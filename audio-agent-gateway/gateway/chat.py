@@ -300,15 +300,20 @@ class Chat:
                 return
             if isinstance(text, str):
                 current["text"] += text
+        # Heart may ack persistence on meta before message_stop. Archive once, keep
+        # the ack on the following message_stop so the desktop bubble is not dropped.
         if event == "message_stop" or (isinstance(persisted, dict) and persisted.get("kind") == "self"):
             saved = self.archive_reply(partial=bool(current.get("failed")), source=(persisted or {}).get("from", "final"),
                                        session_id=data.get("session_id"), current=current)
             if saved:
+                current["last_persisted"] = saved
                 data["persisted"] = saved
                 if not current.get("failed"):
                     feedback = {"text": current["text"], "final": True, "id": saved["seq"]}
-            current["reply"] += 1
-            current["text"] = ""
+                current["reply"] += 1
+                current["text"] = ""
+            elif event == "message_stop" and current.get("last_persisted"):
+                data["persisted"] = current["last_persisted"]
         if counted:
             self.emit(event, data, current=current, events=events)
         else:

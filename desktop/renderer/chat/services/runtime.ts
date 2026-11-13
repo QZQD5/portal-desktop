@@ -1777,14 +1777,20 @@ function createStreamRuntime(state: any, options: any): any {
                 renderTimer = null;
               }
               removeThinkingIndicator();
+              if (data.persisted) acceptPersisted(data);
               if (streamMessage) {
                 setMessageStreaming(streamMessage, false);
                 const visibleText = cleanContent(streamText);
                 if (visibleText) updateMessage(streamMessage, visibleText);
-                else removeMessage(streamMessage);
+                else if (streamMessage.persistedText || streamMessage.historySeq) {
+                  // Persistence already bound (often via preceding meta.persisted).
+                  // Keep the bubble even when this stop frame carries no fresh tokens.
+                  if (streamMessage.persistedText) streamMessage.text = streamMessage.persistedText;
+                } else removeMessage(streamMessage);
               }
               noteStreamEcho();
               settleReplyBoundary();
+              const persistedSeq = Number(data.persisted?.seq) || 0;
               streamMessage = null;
               streamText = "";
               if (data.session_id) sessionId = data.session_id;
@@ -1792,6 +1798,7 @@ function createStreamRuntime(state: any, options: any): any {
               tuiDone();
               clearTuiHint();
               syncHistoryCursor(); // 推进游标，避免之后的增量对账重画这条回复
+              if (persistedSeq > 0) void ensurePersistedReply(persistedSeq);
             }
 
             if (eventType === "error") {
@@ -3137,6 +3144,46 @@ function createStreamRuntime(state: any, options: any): any {
     } catch (_: any) {}
   }
 
+  /** Guarantee a Gateway-archived assistant row appears after message_stop. */
+  async function ensurePersistedReply(seq: number) {
+    if (!Number.isSafeInteger(seq) || seq <= 0 || disposed) return;
+    const visible = () => state.items.some((item: any) => item.kind === "message" && item.role === "being"
+      && item.historySeq === seq && !!(item.text || item.persistedText));
+    if (visible()) return;
+    try {
+      await syncHistoryCursor();
+      if (disposed || visible()) return;
+      const row = recentHistory.get(seq);
+      if (row) {
+        const scene = messageScene(row);
+        const role = row.role === "user" ? "user" : "being";
+        if (!mergePersistedHistory(row) && !consumeLocalEcho(role, row.content, scene, historyIdentity(row, scene))) {
+          addHistoryMessage(row);
+        }
+        lastHistorySeq = Math.max(lastHistorySeq, seq);
+        changed();
+        if (visible()) return;
+      }
+      // Direct page around the ack — recovers when after= cursor was polluted.
+      const response = await fetch(apiUrl(`/api/history?after=${Math.max(0, seq - 1)}&limit=5`), {
+        cache: "no-store", signal: timeoutSignal(8000),
+      });
+      if (!response.ok || disposed) return;
+      const data = await response.json();
+      const page = normalizeHistoryRows(data.messages);
+      cacheHistory(page, Math.max(lastHistorySeq, ...page.map((m: any) => Number(m.seq) || 0), seq));
+      const target = page.find((m: any) => Number(m.seq) === seq) || recentHistory.get(seq);
+      if (!target || disposed) return;
+      const scene = messageScene(target);
+      const role = target.role === "user" ? "user" : "being";
+      if (!mergePersistedHistory(target) && !consumeLocalEcho(role, target.content, scene, historyIdentity(target, scene))) {
+        addHistoryMessage(target);
+      }
+      lastHistorySeq = Math.max(lastHistorySeq, seq);
+      changed();
+    } catch (_: any) {}
+  }
+
   // A 202 response means the message was queued for a later SBS breath. Poll
   // history until that autonomous reply is persisted and render it incrementally.
   const CATCH_UP_INITIAL_MS = 2000;
@@ -3662,7 +3709,9 @@ function createStreamRuntime(state: any, options: any): any {
     setMessageStreaming(streamMessage, false);
     const finalText = cleanContent(streamText);
     if (finalText) updateMessage(streamMessage, finalText);
-    else removeMessage(streamMessage);
+    else if (streamMessage.persistedText || streamMessage.historySeq) {
+      if (streamMessage.persistedText) streamMessage.text = streamMessage.persistedText;
+    } else removeMessage(streamMessage);
   }
 
   function finalizeReplayStream() {

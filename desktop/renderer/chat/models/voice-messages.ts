@@ -6,9 +6,14 @@ export function voiceMessages(items: ChatItem[], voice: VoiceState | null, disca
   const presentation = voice?.presentation;
   const discarded = new Set(discardedTaskIds);
   for (const task of presentation?.tasks || [])
-    if (task.outputDiscarded) discarded.add(task.id);
-  if (discarded.size) items = items.filter(item => item.kind !== 'message' || item.role !== 'being' ||
-    !discarded.has(item.taskId || item.voiceKey?.replace(/^agent:/, '') || ''));
+    if (task.outputDiscarded && task.id) discarded.add(task.id);
+  // Only hide Being bubbles that belong to a discarded voice/agent task.
+  // Never treat a missing taskId/voiceKey as "" — that would wipe ordinary text replies.
+  if (discarded.size) items = items.filter(item => {
+    if (item.kind !== 'message' || item.role !== 'being') return true;
+    const id = item.taskId || item.voiceKey?.replace(/^agent:/, '');
+    return !id || !discarded.has(id);
+  });
   if (!presentation) return items;
   items = voiceWorkRuns(items, presentation, voice!.state === 'ready');
   const pending = new Map(presentation.messages

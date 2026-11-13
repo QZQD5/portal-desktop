@@ -54,7 +54,9 @@ export function historyCacheDatabaseName(endpoint: string) {
     if (!["http:", "https:"].includes(url.protocol)) return null;
     // Credentials, query parameters, theme and frame revision are never identity.
     const scope = url.origin + url.pathname.replace(/\/+$/, "");
-    return `loom-history-${encodeURIComponent(scope)}`;
+    // v2: Desktop now reads Gateway-local history seqs via /api/heart/history.
+    // Old caches stored Heart upstream seqs and could freeze after= past Gateway.
+    return `loom-history-gateway-v2-${encodeURIComponent(scope)}`;
   } catch {
     return null;
   }
