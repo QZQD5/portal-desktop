@@ -108,17 +108,29 @@ macOS 按芯片选择安装包：Apple Silicon 下载 `portal-desktop-<版本>-m
 
 ### 环境与启动
 
-完整构建需要 Git、Node.js 22.12+、npm、Rust stable 及目标平台的链接工具。macOS 需 Xcode Command Line Tools；Windows 需 MSVC、Visual Studio C++ Build Tools 和 Windows SDK。只开发聊天界面时可暂不构建 Portal。
+完整构建需要 Git、Node.js 22.12+、npm、Python 3.12+、Rust stable 及目标平台的链接工具。macOS 需 Xcode Command Line Tools；Windows 需 MSVC、Visual Studio C++ Build Tools 和 Windows SDK。只开发聊天和语音时可暂不构建 Portal。
+
+Python Gateway 已内嵌在仓库的 `audio-agent-gateway/`。`npm start` 会自动拉起它：键盘文字直达 Being，语音走 Being 代理并用 Loom token 认证，不需要再配 `DOUBAO_API_KEY`。
 
 ```bash
-git clone --recurse-submodules https://github.com/d5z/portal-desktop.git portal-desktop
+git clone --recurse-submodules https://github.com/wpyNJU/portal-desktop.git portal-desktop
 cd portal-desktop
 npm ci
+
+# 准备内嵌 Gateway（每个克隆 / 依赖变更后做一次）
+cd audio-agent-gateway
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cd ..
+
+# 需要本机 Portal 工具时再构建
 npm run build:portal
+
 npm start
 ```
 
-已有克隆或拉取更新后，运行 `git submodule update --init --recursive` 取得已提交的引擎源码。GitHub 的源码 ZIP 不包含子模块内容。更新 Portal 后需先提交主仓库的子模块指针，再执行打包命令。
+然后在应用里连接 Being / 配对 Town。已有克隆或拉取更新后，运行 `git submodule update --init --recursive` 取得已提交的 Portal 引擎源码。GitHub 的源码 ZIP 不包含子模块内容。更新 Portal 后需先提交主仓库的子模块指针，再执行打包命令。
 
 ### 检查与打包
 
@@ -151,10 +163,11 @@ npm run test:browser
 ### 仓库结构
 
 ```text
-desktop/           Electron 主进程、preload、界面与实现说明
-web/               独立 Web 入口与部署
-plugins/sdk/       对外插件类型契约
-docs/              文档导航、设计方案、历史核查与种子说明
+desktop/               Electron 主进程、preload、界面与实现说明
+audio-agent-gateway/   内嵌 Python Gateway（文字与语音）
+web/                   独立 Web 入口与部署
+plugins/sdk/           对外插件类型契约
+docs/                  文档导航、设计方案、历史核查与种子说明
 experiments/       不参与产品构建的独立原型
 heart-portal/      Rust Portal 固定提交子模块（构建不自动更新源码）
 scripts/           资源准备、构建、测试与发布脚本

@@ -111,17 +111,29 @@ Installation, reinstallation, upgrades, and normal startup use the Portal bundle
 
 ### Prerequisites and launch
 
-A full build requires Git, Node.js 22.12+, npm, Rust stable, and the target platform's linker tools. macOS needs Xcode Command Line Tools. Windows needs MSVC, Visual Studio C++ Build Tools, and the Windows SDK. You can skip the Portal build while working only on the chat interface.
+A full build requires Git, Node.js 22.12+, npm, Python 3.12+, Rust stable, and the target platform's linker tools. macOS needs Xcode Command Line Tools. Windows needs MSVC, Visual Studio C++ Build Tools, and the Windows SDK. You can skip the Portal build while working only on chat and voice.
+
+The Python Gateway lives in this repo under `audio-agent-gateway/`. Desktop starts it automatically; keyboard text goes straight to Being, and voice uses the Being proxy with your Loom token (no `DOUBAO_API_KEY`).
 
 ```bash
-git clone --recurse-submodules https://github.com/d5z/portal-desktop.git portal-desktop
+git clone --recurse-submodules https://github.com/wpyNJU/portal-desktop.git portal-desktop
 cd portal-desktop
 npm ci
+
+# Prepare the embedded Gateway (once per clone / after dependency changes)
+cd audio-agent-gateway
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cd ..
+
+# Optional if you need local Portal tools
 npm run build:portal
+
 npm start
 ```
 
-For an existing clone, or after pulling updates, run `git submodule update --init --recursive` to obtain the pinned engine revision. GitHub source ZIPs do not include submodules. Follow [UPSTREAM.md](UPSTREAM.md) when updating Portal or maintaining its compatibility branch. Normal builds do not track a moving remote branch.
+Then connect your Being / Town in the app. For an existing clone, or after pulling updates, run `git submodule update --init --recursive` to obtain the pinned Portal engine revision. GitHub source ZIPs do not include submodules. Follow [UPSTREAM.md](UPSTREAM.md) when updating Portal or maintaining its compatibility branch.
 
 ### Checks and packaging
 
@@ -154,9 +166,10 @@ The [CI workflow](.github/workflows/desktop-tests.yml) runs macOS / Windows chec
 ### Repository layout
 
 ```text
-desktop/           Electron main process, preload, UI, and implementation guides
-web/               Standalone Web entry points and deployment
-plugins/sdk/       Public plugin type contracts
+desktop/               Electron main process, preload, UI, and implementation guides
+audio-agent-gateway/   Embedded Python Gateway (chat + voice)
+web/                   Standalone Web entry points and deployment
+plugins/sdk/           Public plugin type contracts
 docs/              Documentation index, designs, historical reviews, and seeds
 experiments/       Isolated prototypes outside the product build
 heart-portal/      Pinned Rust Portal submodule
