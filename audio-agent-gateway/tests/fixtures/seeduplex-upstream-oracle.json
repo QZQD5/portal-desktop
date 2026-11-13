@@ -1,0 +1,265 @@
+{
+  "incoming": [
+    {
+      "event": {
+        "type": "response.output_text.delta",
+        "response_id": "r1",
+        "text": "你好"
+      },
+      "output": [
+        {
+          "type": "response.created",
+          "response": {
+            "id": "r1"
+          }
+        },
+        {
+          "type": "response.text.delta",
+          "response_id": "r1",
+          "text": "你好",
+          "delta": "你好"
+        }
+      ]
+    },
+    {
+      "event": {
+        "type": "response.output_text.done",
+        "text": "你好"
+      },
+      "output": [
+        {
+          "type": "response.text.done",
+          "text": "你好",
+          "response_id": "r1"
+        }
+      ]
+    },
+    {
+      "event": {
+        "type": "response.output_audio.started"
+      },
+      "output": [
+        {
+          "type": "response.activity",
+          "response_id": "r1"
+        }
+      ]
+    },
+    {
+      "event": {
+        "type": "response.output_audio.delta",
+        "audio": "AACAvwAAAL8AAAAAAAAAPwAAgD8="
+      },
+      "output": [
+        {
+          "type": "response.output_audio.delta",
+          "audio": "AACAvwAAAL8AAAAAAAAAPwAAgD8=",
+          "response_id": "r1",
+          "delta": "AIAAwAAAAED/fw==",
+          "sampleRate": 24000
+        }
+      ]
+    },
+    {
+      "event": {
+        "type": "response.output_audio.done"
+      },
+      "output": [
+        {
+          "type": "response.output_audio.done",
+          "response_id": "r1"
+        }
+      ]
+    },
+    {
+      "event": {
+        "type": "response.function_call_arguments.done",
+        "items": [
+          {
+            "call_id": "c1",
+            "name": "lookup",
+            "arguments": "{\"q\":\"天气\"}"
+          },
+          {
+            "call_id": "c2",
+            "name": "clock",
+            "arguments": "{}"
+          }
+        ]
+      },
+      "output": [
+        {
+          "type": "response.function_call_arguments.done",
+          "response_id": "r1",
+          "call_id": "c1",
+          "name": "lookup",
+          "arguments": "{\"q\":\"天气\"}"
+        },
+        {
+          "type": "response.function_call_arguments.done",
+          "response_id": "r1",
+          "call_id": "c2",
+          "name": "clock",
+          "arguments": "{}"
+        }
+      ]
+    },
+    {
+      "event": {
+        "type": "response.done"
+      },
+      "output": [
+        {
+          "type": "response.done",
+          "response_id": "r1",
+          "response": {
+            "id": "r1",
+            "status": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "event": {
+        "type": "response.output_text.delta",
+        "response_id": "r2",
+        "delta": "new"
+      },
+      "output": [
+        {
+          "type": "response.created",
+          "response": {
+            "id": "r2"
+          }
+        },
+        {
+          "type": "response.text.delta",
+          "response_id": "r2",
+          "delta": "new"
+        }
+      ]
+    },
+    {
+      "event": {
+        "type": "response.canceled"
+      },
+      "output": [
+        {
+          "type": "response.done",
+          "response": {
+            "status": "cancelled",
+            "id": "r2"
+          },
+          "response_id": "r2"
+        }
+      ]
+    }
+  ],
+  "context": [
+    {
+      "item": {
+        "id": "u",
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": " context "
+          }
+        ]
+      },
+      "output": {
+        "type": "conversation.item.create",
+        "items": [
+          {
+            "id": "u",
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "context"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "item": {
+        "id": "a",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "history"
+          }
+        ]
+      },
+      "output": {
+        "type": "conversation.item.create",
+        "items": [
+          {
+            "id": "a",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "history"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "item": {
+        "type": "function_call_output",
+        "call_id": "c1",
+        "output": "{\"error\":true}"
+      },
+      "output": {
+        "type": "conversation.item.create",
+        "items": [
+          {
+            "call_id": "c1",
+            "role": "tool",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "{\"error\":true}"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "interactive": {
+    "item": null,
+    "commit": {
+      "type": "speech_text_buffer.commit",
+      "text": "context"
+    }
+  },
+  "instructions": {
+    "type": "speech_text_buffer.commit",
+    "text": "announce result"
+  },
+  "controls": [
+    {
+      "type": "response.cancel"
+    },
+    {
+      "type": "input_audio_mute.commit"
+    },
+    {
+      "type": "input_audio_unmute.commit"
+    },
+    {
+      "type": "session.close"
+    }
+  ]
+}

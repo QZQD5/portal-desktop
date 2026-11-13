@@ -283,11 +283,13 @@ describe("React chat runtime lifecycle", () => {
       await runtime.send("再补充一点", [], { mode: 'interrupt' });
       await flush();
       expect(sent).toEqual([
-        { message: "第一条", ...scene },
-        { message: "继续讨论", session_id: "session-fixture", ...scene },
-        { message: "继续讨论", session_id: "session-fixture", ...scene },
-        { message: "再补充一点", session_id: "session-fixture", ...scene },
+        { message: "第一条", client_request_id: expect.any(String), ...scene },
+        { message: "继续讨论", client_request_id: expect.any(String), session_id: "session-fixture", ...scene },
+        { message: "继续讨论", client_request_id: expect.any(String), session_id: "session-fixture", ...scene },
+        { message: "再补充一点", client_request_id: expect.any(String), session_id: "session-fixture", ...scene },
       ]);
+      expect(sent[1].client_request_id).toBe(sent[2].client_request_id);
+      expect(new Set(sent.map(item => item.client_request_id)).size).toBe(3);
       stream.enqueue(new TextEncoder().encode('event: message_stop\ndata: {}\n\n'));
       stream.close();
       await sending;

@@ -1,0 +1,143 @@
+{
+  "budget": [
+    {
+      "size": 1,
+      "buffered": 0,
+      "audio": false,
+      "accepted": true,
+      "closed": false
+    },
+    {
+      "size": 1048576,
+      "buffered": 0,
+      "audio": false,
+      "accepted": true,
+      "closed": false
+    },
+    {
+      "size": 1048576,
+      "buffered": 1,
+      "audio": false,
+      "accepted": false,
+      "closed": true
+    },
+    {
+      "size": 2097152,
+      "buffered": 0,
+      "audio": false,
+      "accepted": true,
+      "closed": false
+    },
+    {
+      "size": 2097152,
+      "buffered": 1,
+      "audio": false,
+      "accepted": false,
+      "closed": true
+    },
+    {
+      "size": 20971520,
+      "buffered": 0,
+      "audio": false,
+      "accepted": true,
+      "closed": false
+    },
+    {
+      "size": 20971521,
+      "buffered": 0,
+      "audio": false,
+      "accepted": false,
+      "closed": true
+    },
+    {
+      "size": 524288,
+      "buffered": 0,
+      "audio": true,
+      "accepted": true,
+      "closed": false
+    },
+    {
+      "size": 524289,
+      "buffered": 0,
+      "audio": true,
+      "accepted": false,
+      "closed": true
+    },
+    {
+      "size": 1,
+      "buffered": 524287,
+      "audio": true,
+      "accepted": true,
+      "closed": false
+    },
+    {
+      "size": 1,
+      "buffered": 524288,
+      "audio": true,
+      "accepted": false,
+      "closed": true
+    }
+  ],
+  "concurrent": {
+    "attempts": 1,
+    "rejected": 8
+  },
+  "recovery": {
+    "cancels": 1,
+    "phase": "idle"
+  },
+  "external": {
+    "status": "failed",
+    "error": true,
+    "error_code": "external_tool_unavailable",
+    "user_message": "外部工具暂时不可用。",
+    "retryable": true
+  },
+  "backoff": [
+    {
+      "random": 0,
+      "delays": [
+        400,
+        800,
+        1600,
+        3200,
+        6400,
+        8000,
+        8000,
+        8000,
+        8000
+      ],
+      "reset": 400
+    },
+    {
+      "random": 0.5,
+      "delays": [
+        500,
+        1000,
+        2000,
+        4000,
+        8000,
+        10000,
+        10000,
+        10000,
+        10000
+      ],
+      "reset": 500
+    },
+    {
+      "random": 1,
+      "delays": [
+        600,
+        1200,
+        2400,
+        4800,
+        9600,
+        12000,
+        12000,
+        12000,
+        12000
+      ],
+      "reset": 600
+    }
+  ]
+}

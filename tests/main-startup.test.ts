@@ -88,10 +88,41 @@ it.each(['normal', 'manual installer', 'downloaded update'] as const)('initializ
     expect((await readFile(archives[0])).subarray(0, 2).toString()).toBe('PK');
     expect(snapshot.portal.message).toBe('Windows 命令环境不可用，请检查后重试。');
     expect(snapshot.notice).not.toContain('ENOENT');
+    const { VoiceGateway } = await import('../desktop/main/voice/gateway');
+    const voiceShutdown = vi.spyOn(VoiceGateway.prototype, 'shutdown');
+    if (shutdown === 'normal') {
+      const { parseConnection } = await import('../desktop/main/chat/connection');
+      const settingsStore = load.mock.contexts[0] as InstanceType<typeof SettingsStore>;
+      settingsStore.connection = parseConnection('http://127.0.0.1:1/fixture/?token=fixture');
+      const endpoint = settingsStore.connection.endpoint;
+      const change = (operation: string, value: string, sceneId?: string) => handlers.get('beings:chat-session')!(request as never, operation, value, endpoint, sceneId);
+      const original = snapshot.chatScene.scene_id;
+      const created = await change('create', 'Other');
+      const other = created.chatScene.scene_id;
+      await change('select', original);
+      await change('rename', 'Other renamed', other);
+      await change('delete', other);
+      await expect(change('rename', '')).rejects.toThrow('场景名称');
+      expect(voiceShutdown).not.toHaveBeenCalled();
+      settingsStore.connection = null;
+    }
     const detail = 'powershell.exe (1): Error: Config file not found: status\n#< CLIXML\n<Objs>runtime details</Objs>';
     vi.spyOn(SettingsStore.prototype, 'save').mockRejectedValueOnce(new Error(detail));
     await expect(handlers.get('beings:save')!(request as never, {})).rejects.toThrow('旧 Portal 版本不兼容，请停止旧实例后重试。');
+    expect(voiceShutdown).not.toHaveBeenCalled();
     await vi.waitFor(async () => expect(await readFile(path.join(fixture.directory, 'logs/client-errors.log'), 'utf8')).toContain(detail));
+
+    // WebContents can be destroyed before its BrowserWindow reports destruction.
+    window.webContents.isDestroyed = () => true;
+    window.webContents.send.mockClear();
+    window.webContents.send.mockImplementation(() => { throw new TypeError('Object has been destroyed'); });
+    try {
+      expect(() => window.webContents.emit('destroyed')).not.toThrow();
+      expect(window.webContents.send).not.toHaveBeenCalled();
+    } finally {
+      window.webContents.isDestroyed = () => false;
+      window.webContents.send.mockReset();
+    }
 
     // app.quit emits before-quit before asking windows to close. The real main
     // window hides and cancels that close unless this callback reports quitting.

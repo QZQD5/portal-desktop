@@ -58,7 +58,7 @@ describe('plugin navigation icons', () => {
     await rm(path.join(source, 'assets'), { recursive: true });
     await mkdir(path.join(root, 'outside'));
     await writeFile(path.join(root, 'outside/icon.png'), 'private');
-    await symlink(path.join(root, 'outside'), path.join(source, 'assets'), 'dir');
+    await symlink(path.join(root, 'outside'), path.join(source, 'assets'), process.platform === 'win32' ? 'junction' : 'dir');
     await expect(readPlugin(source)).rejects.toThrow('目录内');
   });
   // The boundary fixture expands to ~48 MB of JSON and is read/written several

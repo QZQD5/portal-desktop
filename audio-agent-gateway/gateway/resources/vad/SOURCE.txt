@@ -1,0 +1,6 @@
+Silero VAD, MIT License (see LICENSE).
+https://github.com/snakers4/silero-vad
+
+Copied unchanged from speech-to-speech/models/silero-vad/silero_vad.jit.
+SHA256: e1122837f4154c511485fe0b9c64455f7b929c96fbb8d79fbdb336383ebd3720
+Runs locally on CPU; no model download is performed at runtime.

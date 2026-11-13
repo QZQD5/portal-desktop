@@ -14,3 +14,12 @@ plugins/*/dist/
 output
 resources/runtime-bundle.json
 resources/.portal-ready.json
+resources/audio-gateway/
+audio-agent-gateway/.venv
+audio-agent-gateway/.runtime/
+audio-agent-gateway/**/__pycache__/
+audio-agent-gateway/.pytest_cache/
+audio-agent-gateway/config/.env.local
+audio-agent-gateway/scripts/dist/
+
+audio-agent-gateway/.idea/

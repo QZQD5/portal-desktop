@@ -74,8 +74,11 @@ describe('local preview capabilities', () => {
     await mkdir(path.join(workspace,'folder.html'));
     await writeFile(path.join(workspace,'.portal-connection.url'),'not-previewable');
     await writeFile(path.join(workspace,'large.txt'),'a'.repeat(2*1024*1024+1));
-    await symlink(path.join(workspace,'missing.html'),path.join(workspace,'broken.html'));
-    expect(await previews.available(['exists.html','missing.html','folder.html','.portal-connection.url','large.txt','broken.html','https://example.com/file.html'])).toEqual([true,false,false,false,false,false,false]);
+    // Junctions exercise Windows reparse paths without requiring symlink privileges.
+    const broken = process.platform === 'win32' ? 'broken/missing.html' : 'broken.html';
+    await symlink(path.join(workspace, process.platform === 'win32' ? 'missing-dir' : 'missing.html'),
+      path.join(workspace, process.platform === 'win32' ? 'broken' : broken), process.platform === 'win32' ? 'junction' : 'file');
+    expect(await previews.available(['exists.html','missing.html','folder.html','.portal-connection.url','large.txt',broken,'https://example.com/file.html'])).toEqual([true,false,false,false,false,false,false]);
     await rm(path.join(workspace,'exists.html'));
     expect(await previews.available(['exists.html'])).toEqual([false]);
     await writeFile(path.join(workspace,'exists.html'),'New file');
@@ -101,10 +104,16 @@ describe('local preview capabilities', () => {
     await writeFile(path.join(workspace, 'style.css'), 'body{color:red}');
     await writeFile(path.join(workspace, 'private.json'), '{"secret":true}');
     await writeFile(path.join(root, 'outside.html'), 'outside');
-    await symlink(path.join(root, 'outside.html'), path.join(workspace, 'escape.html'));
+    let escape = 'escape.html';
+    if (process.platform === 'win32') {
+      await mkdir(path.join(root, 'outside-assets'));
+      await writeFile(path.join(root, 'outside-assets', 'outside.html'), 'outside');
+      await symlink(path.join(root, 'outside-assets'), path.join(workspace, 'escape'), 'junction');
+      escape = 'escape/outside.html';
+    } else await symlink(path.join(root, 'outside.html'), path.join(workspace, escape));
     const file = await previews.preview('index.html'); const base = file.url!.slice(0, file.url!.lastIndexOf('/') + 1);
     expect((await previews.resource(new Request(base + 'style.css'))).status).toBe(200);
-    for (const name of ['..%2Foutside.html', 'escape.html', 'private.json']) expect((await previews.resource(new Request(base + name))).status).toBe(403);
+    for (const name of ['..%2Foutside.html', escape, 'private.json']) expect((await previews.resource(new Request(base + name))).status).toBe(403);
     expect((await previews.resource(new Request(base + 'index.html', { method: 'POST' }))).status).toBe(405);
     expect((await previews.resource(new Request('beings://preview/unknown/index.html'))).status).toBe(404);
   });

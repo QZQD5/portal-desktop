@@ -12,7 +12,8 @@ import { macDmgIdentifier, verifyMacSignature } from './desktop/main/updates/mac
 import pkg from './package.json';
 
 const binary = path.resolve('resources', process.platform === 'win32' ? 'heart-portal.exe' : 'heart-portal');
-const extraResource = [binary, path.resolve('resources/HEART-PORTAL-LICENSE'), path.resolve('resources/branding'), path.resolve('resources/runtime-bundle.json'), path.resolve('node_modules/npm'), path.resolve('resources/node-bin')];
+const voiceRuntime = path.resolve('resources/audio-gateway');
+const extraResource = [binary, path.resolve('resources/HEART-PORTAL-LICENSE'), path.resolve('resources/branding'), path.resolve('resources/runtime-bundle.json'), path.resolve('node_modules/npm'), path.resolve('resources/node-bin'), voiceRuntime];
 const rendererName = 'main_window';
 const macLocalTest = process.env.PORTAL_DESKTOP_MAC_LOCAL_TEST === '1';
 const macIdentity = macLocalTest ? '-' : signing.identity;
@@ -54,6 +55,16 @@ const config: ForgeConfig = {
     prePackage: async () => {
       execFileSync(process.execPath, ['scripts/check-desktop-dependencies.mjs'], { stdio: 'inherit' });
       if (!existsSync(binary)) throw new Error('Portal binary missing. Run npm run build:portal first.');
+      if (process.platform === 'win32') {
+        execFileSync(process.execPath, ['scripts/build-voice.mjs', '--source', path.resolve('audio-agent-gateway')], { stdio: 'inherit' });
+      } else {
+        execFileSync(process.execPath, ['scripts/prepare-gateway.mjs', '--package'], { stdio: 'inherit' });
+      }
+      if (!existsSync(path.join(voiceRuntime, 'gateway', '__main__.py'))
+          && !existsSync(path.join(voiceRuntime, 'AudioAgentGateway.exe'))
+          && !existsSync(path.join(voiceRuntime, 'AudioAgentGateway'))) {
+        throw new Error('Python Gateway runtime missing.');
+      }
       if (process.platform === 'darwin') execFileSync(process.execPath, ['scripts/sign-macos-runtime.mjs'], { stdio: 'inherit' });
     },
     postPackage: async (_forgeConfig, result) => {

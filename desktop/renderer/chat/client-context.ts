@@ -1,12 +1,12 @@
 import type { ChatScene } from '../../shared/types';
-import { HistoryCache } from './services/history-cache';
+import { createHistory } from './services/gateway-history';
 import { handleClientCommand } from './services/client-commands';
 
 // Runs in a sandboxed iframe with the same origin, session and top-level site as Loom.
 // No remote content, preload, credentials, or dependency on the visible window.
 Object.assign(window, {
   async clientCommand(endpoint: string, verb: string, args: string, sceneId?: string, knownScenes: ChatScene[] | null = []) {
-    const cache = new HistoryCache(endpoint);
+    const cache = createHistory(endpoint);
     try {
       return await handleClientCommand({
         context: (id, limit) => cache.context(id, limit),

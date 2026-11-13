@@ -13,18 +13,22 @@ export interface HistoryMessage {
   type?: string;
   scene_id?: string;
   scene_label?: string;
+  voiceKey?: string;
+  voicePending?: boolean;
 }
 
 /** A history page is an upsert, never a replacement for the local transcript. */
 export function mergeHistoryRow(previous: HistoryMessage | undefined, incoming: HistoryMessage): HistoryMessage {
   const row: HistoryMessage = { seq: Number(incoming.seq), role: incoming.role, content: incoming.content };
-  for (const key of ["at", "from", "type", "scene_id", "scene_label"] as const) {
+  for (const key of ["at", "from", "type", "scene_id", "scene_label", "voiceKey"] as const) {
     const value = key === "scene_label" ? messageScene(incoming).sceneLabel : incoming[key];
     // Older servers and partial snapshots can omit scene metadata. Do not move
     // a known row out of its scene index when merging such a response.
     if (typeof value === "string" && value) row[key] = value;
     else if (previous?.[key]) row[key] = previous[key];
   }
+  if (typeof incoming.voicePending === 'boolean') row.voicePending = incoming.voicePending;
+  else if (previous?.voicePending !== undefined) row.voicePending = previous.voicePending;
   return row;
 }
 

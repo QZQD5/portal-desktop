@@ -194,6 +194,32 @@ it('registers Windows login supervision with DPAPI stdin and disables the task a
   expect(scripts.at(-2)).toContain('ExecutablePath -eq');
 });
 
+it.each(['darwin', 'win32'] as const)('replaces the %s runtime when permission mode changes in either direction', async platform => {
+  const f = await fixture();
+  const run: Command = async (_bin, args) => {
+    if (platform === 'darwin') return f.run(_bin, args);
+    const script = Buffer.from(args.at(-1)!, 'base64').toString('utf16le');
+    if (script.includes('[Console]::In.ReadToEnd()')) return 'dpapi-fixture';
+    if (script.includes('ConvertTo-Json')) return JSON.stringify({ enabled: true, running: false });
+    return '';
+  };
+  const service = new BackgroundPortal(path.join(f.root, 'profile'), run, platform, f.root);
+  await service.enable(f.settings, f.connection);
+  let previous = service.installedService!.root;
+  for (const permissionMode of ['full-access', 'read-only', 'supervised'] as const) {
+    const settings = { ...f.settings, permissionMode };
+    await service.enable(settings, f.connection);
+    const root = service.installedService!.root;
+    expect(root).not.toBe(previous);
+    expect(await readFile(path.join(root, 'portal.toml'), 'utf8')).toContain(`permission_mode = "${permissionMode}"`);
+    expect(await readFile(path.join(root, platform === 'win32' ? 'run.ps1' : 'run.sh'), 'utf8'))
+      .toContain(platform === 'win32' ? `"--permission-mode" "${permissionMode}"` : `'--permission-mode' '${permissionMode}'`);
+    await service.enable(settings, f.connection);
+    expect(service.installedService!.root).toBe(root);
+    previous = root;
+  }
+});
+
 it('resets a stopped Windows failure marker on explicit load and exports supervisor evidence from its saved runtime', async () => {
   const f = await fixture(); let running = false;
   const run: Command = async (_bin, args) => {

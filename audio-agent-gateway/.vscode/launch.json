@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Gateway：Debug（3102）",
+      "type": "debugpy",
+      "request": "launch",
+      "pythonArgs": [
+        "-u"
+      ],
+      "module": "gateway",
+      "args": [
+        "--dev",
+        "--port",
+        "3102"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {}
+    }
+  ]
+}

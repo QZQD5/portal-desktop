@@ -40,6 +40,7 @@ import { installWindowsTaskbarIcons } from './taskbar-icons';
 import { bundledNpmCLI, nativeResource } from './resources';
 import { createApplicationTray, installApplicationMenu } from './tray';
 import { repairDevelopmentShortcut } from './windows-identity';
+import { VoiceGateway } from '../voice/gateway';
 
 export interface DesktopOptions {
   userData: string; assets: string; shellURL(): string; development: boolean;
@@ -53,6 +54,7 @@ export function createDesktopApplication(options: DesktopOptions) {
   let home: HomeService | undefined;
   let portal: PortalSupervisor;
   let proxy: ChatProxy;
+  let voice: VoiceGateway | undefined;
   let store: SettingsStore;
   let background: BackgroundPortal;
   let kitInstaller: KitInstaller;
@@ -68,6 +70,7 @@ export function createDesktopApplication(options: DesktopOptions) {
   const exclusive = mutations.run;
   const cleanupForQuit = async () => {
     await lifecycle.prepareWindowsForQuit();
+    await voice?.shutdown();
     await dshPlugins?.shutdown();
     await kitInstaller?.dispose();
     await portal.stop();
@@ -174,6 +177,27 @@ export function createDesktopApplication(options: DesktopOptions) {
       });
     }
     registerLocalProtocol(assets, proxy, plugins, attachmentDownloads, localFiles, dshPlugins);
+    voice = new VoiceGateway({
+      directory, resources: app.isPackaged ? process.resourcesPath : path.resolve('resources'), packaged: app.isPackaged,
+      scenes: () => chatSessions?.list(store.connection?.endpoint) || [],
+      binding: () => {
+        const scene = chat.currentScene();
+        return store.connection && scene ? { connection: store.connection, scene } : null;
+      },
+      emit: event => {
+        const target = lifecycle.window;
+        if (target && !target.isDestroyed() && !target.webContents.isDestroyed()) target.webContents.send('beings:voice-event', event);
+      },
+    });
+    proxy.setFetchUpstream((url, init) => {
+      const pathname = new URL(url instanceof Request ? url.url : String(url)).pathname;
+      if (['/api/chat/stream', '/api/history', '/api/stream/active', '/api/stop'].some(route => pathname.endsWith(route))) {
+        return voice!.fetchChat(url, init);
+      }
+      return init?.body instanceof ReadableStream ? fetch(url, init) : net.fetch(url as string, init);
+    });
+    proxy.localHistory = (route, init) => voice!.request(route, init);
+    if (store.connection) void voice.ensure().catch(error => errorLog.report('gateway-start', error, '本地 Gateway 启动失败，可在聊天中重试。'));
     configureLocalSession(shellURL, () => notifications.state.supported && notifications.state.preferences.enabled);
     const commands = await createDesktopCommands({ directory, store, plugins, chatSessions, errorLog, shellURL, window: () => lifecycle.window });
     const { approvalDialogs } = commands;
@@ -189,6 +213,9 @@ export function createDesktopApplication(options: DesktopOptions) {
       window: () => lifecycle.window, shellURL, isQuitting: () => lifecycle.quitting,
       recoveryBlocked: () => portalController.recoveryBlocked, errorLog
     });
+    handle('beings:voice-start', () => voice!.start());
+    handle('beings:voice-stop', () => voice!.disconnect());
+    handle('beings:voice-send', (event: import('../../shared/voice').VoiceEvent) => voice!.send(event));
     home = await createDesktopHome({ directory, assets, secretStorage, store, window: () => lifecycle.window, handle });
     registerShellIpc({
       handle, exclusive, directory, store, localFiles, attachmentDownloads, approvalDialogs,
@@ -212,6 +239,7 @@ export function createDesktopApplication(options: DesktopOptions) {
       beforeSave: () => { cancelTownPairing?.(); approvalDialogs.cancel(); },
       afterSave: async () => {
         closePluginSessions(); proxy.abortAll();
+        await voice?.syncBinding();
         await dshPlugins?.whenReady();
         await dshPlugins?.refreshModelCompatibility();
       }

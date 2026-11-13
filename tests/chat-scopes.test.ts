@@ -3,6 +3,12 @@ import { ChatState, type ChatItem } from "../desktop/renderer/chat/models/chat";
 import { inCurrentScene, messageScene, sceneItems, sceneName, sceneTransitionNotice, stripSceneTransition, withSceneTransition } from "../desktop/renderer/chat/models/scenes";
 import { createChatRuntime } from "../desktop/renderer/chat/services/runtime";
 
+// Scene-routing fixtures exercise the runtime independently of the local service.
+vi.mock('../desktop/renderer/chat/services/gateway-history', async () => {
+  const { HistoryCache } = await import('../desktop/renderer/chat/services/history-cache');
+  return { createHistory: (endpoint: string) => new HistoryCache(endpoint) };
+});
+
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 const current = { sceneId: "desktop-test", sceneLabel: "桌面·测试机" };
 

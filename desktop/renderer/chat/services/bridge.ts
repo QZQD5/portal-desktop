@@ -5,6 +5,7 @@ import { validChatHistoryLimit } from '../../../shared/chat-history';
 import { HistoryCache } from './history-cache';
 import { localActivityHistory } from './activity-history';
 import { applyPluginAppearance } from '../../shared/plugin-appearance';
+import { isVoiceState } from '../../../shared/voice';
 
 /** Source-checked desktop transport. It never reads or mutates rendered UI. */
 export function createChatBridge(state: ChatState) {
@@ -137,6 +138,12 @@ export function createChatBridge(state: ChatState) {
         return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
+      if (data.type === 'beings:voice-state') {
+        if (data.revision !== revision || (data.state !== null && !isVoiceState(data.state))) return;
+        state.voice = data.state;
+        state.changed();
+        return;
+      }
       switch (data.type) {
         case 'beings:local-history-request':
           if (data.revision !== revision || data.endpoint !== historyEndpoint || typeof data.id !== 'string' || data.id.length > 64) return;

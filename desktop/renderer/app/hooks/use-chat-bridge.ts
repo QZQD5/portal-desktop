@@ -1,4 +1,6 @@
-import { useEffect, useLayoutEffect, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
+import { useVoice } from '../../voice/use-voice';
+import { VOICE_ACTIONS, type VoiceAction } from '../../../shared/voice';
 import type { AppModel } from "../models/app";
 import { validPlaceTarget } from "../../shared/lib/navigation";
 import { CHAT_SCENE_ACTIVITY_LABELS, type ChatSceneActivity } from "../../../shared/types";
@@ -9,6 +11,17 @@ export function useChatBridge(
   app: AppModel,
   frame: RefObject<HTMLIFrameElement | null>,
 ) {
+  const voice = useVoice(app.api.voice, `${app.snapshot?.settings.endpoint}:${app.snapshot?.chatScene?.scene_id}`, Boolean(app.snapshot?.settings.endpoint && app.snapshot?.chatScene?.scene_id), app.snapshot?.chatScene?.scene_id);
+  const voiceState = useRef(voice.state);
+  voiceState.current = voice.state;
+  useEffect(() => {
+    app.post({ type: 'beings:voice-state', state: voice.state,
+      revision: new URL(frame.current?.src || 'https://invalid').searchParams.get('revision') });
+  }, [app, frame, voice.state, app.chatSource]);
+  useEffect(() => app.api.voice?.onEvent(event => {
+    if (event.type === 'transcript.final') app.post({ type: 'beings:chat-refresh', id: crypto.randomUUID(),
+      revision: new URL(frame.current?.src || 'https://invalid').searchParams.get('revision') });
+  }), [app, frame, app.api.voice]);
   // Follow the model so disconnect/reload resets clear the pet's work status too.
   useEffect(() => { dshRuntime.updateActivity(app.chatSceneActivity); }, [app.chatSceneActivity]);
   useEffect(() => {
@@ -99,6 +112,14 @@ export function useChatBridge(
       }
       if (message.revision !== new URL(target.src).searchParams.get("revision"))
         return;
+      if (message.type === 'beings:voice-state-request') {
+        app.post({ type: 'beings:voice-state', state: voiceState.current, revision: message.revision });
+        return;
+      }
+      if (message.type === 'beings:voice-action') {
+        if (VOICE_ACTIONS.includes(message.action) && !document.querySelector('dialog[open]')) voice.command(message.action as VoiceAction);
+        return;
+      }
       if (message.type === 'beings:appearance-request') {
         app.postAppearance();
         return;

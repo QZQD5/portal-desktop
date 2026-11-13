@@ -1,6 +1,16 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { DesktopAPI, PortalState, TownLiveState } from '../shared/types';
 const api: DesktopAPI = {
+  voice: {
+    start: () => ipcRenderer.invoke('beings:voice-start'),
+    stop: () => ipcRenderer.invoke('beings:voice-stop'),
+    send: event => ipcRenderer.invoke('beings:voice-send', event),
+    onEvent: callback => {
+      const listener = (_event: unknown, value: import('../shared/voice').VoiceEvent) => callback(value);
+      ipcRenderer.on('beings:voice-event', listener);
+      return () => ipcRenderer.removeListener('beings:voice-event', listener);
+    },
+  },
   home: {
     connectors: {
       catalog: query => ipcRenderer.invoke('beings:home-connector-catalog', query),

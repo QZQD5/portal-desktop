@@ -54,6 +54,29 @@ npm run build:portal
 
 ## 构建命令与产物
 
+### 实时语音：分别手动启动 Desktop 和 Python Gateway
+
+开发调试时无需构建 Gateway EXE。先安装 Gateway 仓库的 Python 3.12 依赖及本仓库 npm 依赖，然后打开两个 PowerShell 终端。以下使用当前 Windows 工作目录与 Conda 环境，其他机器替换路径即可。
+
+Python Gateway 已内嵌在仓库的 `audio-agent-gateway/`。开发时先在该目录准备 `.venv`，然后在仓库根目录：
+
+```powershell
+cd C:\Users\shixi\Desktop\portal-desktop
+npm start
+```
+
+Desktop 会自动拉起内嵌 Gateway。语音走 Being 语音代理，用已配对的 Loom token 认证，不需要再填 `DOUBAO_API_KEY`。
+
+在 Desktop 连接 Being、选择聊天场景，点击输入框中发送按钮旁的波形图标即可开启语音，再次点击可暂停或恢复收音，暂停收音时回复仍会播放。输入框顶部的一行显示状态，并提供打断回复、结束通话操作；语音转写通过本地历史显示在聊天消息中。Desktop 只向 Gateway 传递当前 Being/scene，不会另起子进程。两个项目仍通过各自的 `.vscode/launch.json` 分别按 F5 启动。
+
+Python 在终端一输出日志，`Ctrl+C` 停止。修改后手动重启 Gateway，再点击“开启语音通话”重连。退出 Desktop 不会关闭手动 Gateway。IDE 可直接调试 Python 模块 `gateway`，参数 `--dev --port 3102`。开发状态保存在 Gateway 的 `.runtime/dev/`，与 Desktop 管理的状态分开。
+
+不设置 `PORTAL_DESKTOP_GATEWAY_URL` 时，Desktop 自动管理内嵌 Gateway。打包版始终使用内置子进程和随机访问令牌，不读取开发服务器地址。
+
+`npm run test:voice -- --external` 使用本机 Being/语音 fixture 验证手动启动、音频链路、任务播报、重启重连和退出时保留 Gateway；运行测试前设置 `PORTAL_DESKTOP_GATEWAY_ROOT` 和 `PORTAL_DESKTOP_GATEWAY_PYTHON`。
+
+### 生成分发包
+
 在仓库根目录执行：
 
 ```text
@@ -63,6 +86,18 @@ npm run make
 ```
 
 `package` 生成可运行目录；`make` 会自行再次执行 package，并制作分发包，所以仅需分发包时可以跳过独立的 `npm run package`。两者都会先编译子模块 Portal，再生成本地聊天资源并打包；不运行自动化测试。
+
+Python Gateway 是文字聊天、本地历史和实时语音的必需打包资源。缺少运行时会终止打包。当前自动构建脚本支持 Windows；macOS/Linux 需要先准备对应平台的运行时，尚未完成分发验收。在安装了 Gateway 依赖和 PyInstaller 的环境设置：
+
+```powershell
+$env:PORTAL_DESKTOP_GATEWAY_ROOT = 'D:\code\audio-agent-gateway'
+$env:PORTAL_DESKTOP_GATEWAY_PYTHON = 'C:\Users\shixi\miniconda3\envs\audio-agent-gateway\python.exe'
+npm run package
+```
+
+Forge 打包钩子会自动运行 `build:voice` 并复制整个运行时；构建失败会停止打包。CI 也需先检出 Gateway 源码、安装其 Python 依赖及 PyInstaller，再设置相同的环境变量。也可先用 `npm run build:voice -- --source <源码目录>` 准备 `resources/audio-gateway/`，随后打包会带入已有资源。手动调试的两个 `launch.json` 不需要这些构建变量，仍只使用本机 URL 和端口。
+
+Desktop 的文字发送、停止、历史及回放统一经 Gateway；不开麦克风也会连接它。Gateway 在用户数据目录 `gateway/<Being端点摘要>/history.sqlite3` 保存本机对话，`gateway.sqlite3` 保存任务与语音运行状态。旧 Desktop IndexedDB 和旧按场景保存的语音记录只读迁移，原数据保留。Desktop 不再独立写聊天历史。Being 网页对话留在 Being 内部，不同步到 Desktop；本机请求仍能按原流 ID 断线恢复，纯语音闲聊不上传网页。
 
 | 命令 / 平台 | 输出位置（`<arch>` 为当前架构，`<version>` 为桌面版本） |
 | --- | --- |

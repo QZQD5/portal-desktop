@@ -62,7 +62,11 @@ export function registerLocalProtocol(assets: string, proxy: ChatProxy, plugins?
 
 export function configureLocalSession(shellURL: () => string = () => 'beings://desktop/', notificationsAllowed: () => boolean = () => false) {
   const trusted = (url: string | undefined) => { try { const actual = new URL(url || ''), expected = new URL(shellURL()); return actual.protocol === expected.protocol && actual.host === expected.host && actual.pathname === expected.pathname; } catch { return false; } };
-  const allow = (contents: Electron.WebContents | null, permission: string, details: { isMainFrame: boolean; requestingUrl?: string }) => permission === 'notifications' && details.isMainFrame && trusted(details.requestingUrl) && trusted(contents?.getURL()) && notificationsAllowed();
+  const allow = (contents: Electron.WebContents | null, permission: string, details: { isMainFrame: boolean; requestingUrl?: string; mediaTypes?: string[]; mediaType?: string }) => {
+    if (!contents || !details.isMainFrame || !trusted(contents.getURL())) return false;
+    if (permission === 'notifications') return notificationsAllowed() && trusted(details.requestingUrl);
+    return permission === 'media' && details.mediaTypes?.length === 1 && details.mediaTypes[0] === 'audio';
+  };
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => callback(allow(contents, permission, details)));
   session.defaultSession.setPermissionCheckHandler((contents, permission, _origin, details) => allow(contents, permission, details));
 }

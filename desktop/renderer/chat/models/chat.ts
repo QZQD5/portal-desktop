@@ -41,6 +41,8 @@ export interface Message extends MessageScene {
   timestamp: string;
   createdAt?: number;
   historySeq?: number;
+  voiceKey?: string;
+  voicePending?: boolean;
   persistedFrom?: "final" | "act_talk" | "partial";
   persistedStreamId?: string;
   /** Authoritative history content, applied after live rendering finishes. */
@@ -161,6 +163,7 @@ export class ChatState extends Store {
   intelligentUIEnabled = readIntelligentUIPreference();
   permissionMode?: import('../../../shared/security').PermissionMode;
   permissionMenuOpen = false;
+  voice: import('../../../shared/voice').VoiceState | null = null;
   get intelligentUITargetTitle(): string {
     try { return JSON.parse(this.intelligentUISnapshots[this.currentScene.sceneId || 'global'] || '{}').title || ''; }
     catch { return ''; }

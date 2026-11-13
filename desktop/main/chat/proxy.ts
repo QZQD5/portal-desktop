@@ -35,12 +35,14 @@ export function upstreamRequest(request: Request, connection: Connection) {
 }
 
 export class ChatProxy {
+  localHistory?: (path: string, init: RequestInit) => Promise<Response>;
   onAttachmentUploaded?: (token:string, endpoint:string, id:string, checksum:string) => Promise<void>;
   private requests = new Set<AbortController>();
   private noticeSequence = 0;
   private portalRevision = 0;
   private acceptedNotice?: { key: string; sequence: number };
   constructor(private getConnection: () => Connection | null, private fetchUpstream: typeof fetch, private scene?: ChatScene | (() => ChatScene | undefined), private resolveScene?: (id: string) => ChatScene | undefined, private notifyScenePortal = false) {}
+  setFetchUpstream(fetcher: typeof fetch) { this.fetchUpstream = fetcher; }
   abortAll() { for (const controller of this.requests) controller.abort(); this.requests.clear(); }
   portalStateChanged() { this.portalRevision++; }
   async handle(request: Request): Promise<Response> {
@@ -51,6 +53,13 @@ export class ChatProxy {
     if (expectedEndpoint && expectedEndpoint !== connection.endpoint)
       return Response.json({ error: 'Being 连接已切换，请刷新对话后重试。' }, { status: 409 });
     const local = new URL(request.url);
+    if (local.protocol === 'beings:' && local.hostname === 'chat' &&
+        ['/api/local-history', '/api/local-history/scenes', '/api/local-history/import'].includes(local.pathname)) {
+      if (!this.localHistory || (request.method !== 'GET' && !(request.method === 'POST' && local.pathname.endsWith('/import'))))
+        return new Response('Not found', { status: 404 });
+      return this.localHistory(local.pathname + local.search, { method: request.method, headers: { 'Content-Type': 'application/json' },
+        ...(request.method === 'POST' ? { body: await request.text() } : {}), signal: request.signal });
+    }
     if (local.protocol === 'beings:' && local.hostname === 'chat' && imageGenerationRoute(local.pathname)) {
       const controller = new AbortController();
       this.requests.add(controller);

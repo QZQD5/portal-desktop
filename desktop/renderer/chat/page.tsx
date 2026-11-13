@@ -18,6 +18,7 @@ import { useMessageScroll } from "./hooks/use-message-scroll";
 import { IntelligentUIExamples, type UIExampleId } from "./components/intelligent-ui-examples";
 import { ConversationSearch, searchEntries } from "./services/conversation-search";
 import { replyBubbles, historyTargetBubble, quietProgressRuns } from "./models/reply-bubbles";
+import { voiceMessages } from './models/voice-messages';
 import { ScheduledMessage } from './components/scheduling';
 import { splitSchedulingHint, withScheduling } from './models/scheduling';
 import {
@@ -45,6 +46,7 @@ import { CodeClipboard } from "../shared/components/markdown";
 import { type ComposerHandle } from "../shared/components/rich-composer";
 import { ChatComposer } from "./components/composer";
 import { ComposerAddMenu } from './components/composer-add-menu';
+import { VoiceActivity, VoiceControl } from '../voice/control';
 import { canUseComposerCommand, parseComposerCommands } from './models/composer-commands';
 import {useMessageMenu} from '../shared/components/message-menu';
 import {startsTimeGroup,messageTimeLabel} from '../shared/lib/message-time';
@@ -143,7 +145,8 @@ function ChatView({
   useModel(state);
   const { viewport, narrow, nativeTouch } = useChatViewport(mobileWeb);
   const [editingQueued, setEditingQueued] = useState<Message | null>(null);
-  const timelineItems = replyBubbles(sceneItems(withScheduling(state.items.filter(item => item.kind !== "message" || !item.queued || !!item.attachmentViews?.length || !!item.attachmentUploads?.length), state.sceneTasks), state.historyScope, state.currentScene, state.showSbsMessages));
+  const voice = state.voice || { state: 'stopped' as const, muted: false, error: '', transcript: '', task: '' };
+  const timelineItems = replyBubbles(sceneItems(withScheduling(voiceMessages(state.items.filter(item => item.kind !== "message" || !item.queued || !!item.attachmentViews?.length || !!item.attachmentUploads?.length), voice, state.discardedTaskIds), state.sceneTasks), state.historyScope, state.currentScene, state.showSbsMessages));
   const historyWindow=useHistoryWindow(state.historyLoading ? [] : timelineItems,JSON.stringify([state.historyScope,state.currentScene.sceneId,state.showSbsMessages]),before=>runtime.loadOlderHistory(before));
   const visibleItems=historyWindow.items;
   const progressRuns = quietProgressRuns(timelineItems);
@@ -487,7 +490,7 @@ function ChatView({
               <ChatActivity
                 key={item.id}
                 run={item}
-                showDetails={showReasoning}
+                showDetails={showReasoning || item.id.startsWith('voice-work:')}
                 showProgress={progressRuns.has(item.id)}
                 sceneLabel={state.historyScope === "all" ? sceneName(item, state.currentScene, state.sceneNames) : undefined}
               />
@@ -578,6 +581,7 @@ function ChatView({
           event.preventDefault();
           messages.current.scrollBy({ top: event.deltaY, behavior: 'auto' });
         }}>
+          <VoiceActivity state={voice} command={action => bridge.send({ type: 'beings:voice-action', action })}/>
           {state.intelligentUIForMessage && state.intelligentUITargetTitle && <div className="iui-context-target" role="status"><span>修改「{state.intelligentUITargetTitle}」<small>将携带原界面和当前选择</small></span><button type="button" aria-label="取消本条界面修改" onClick={() => state.setIntelligentUIForMessage(false)}>×</button></div>}
           {!state.historyLoading && <JumpToLatest trimHistory={historyWindow.toLatest} status={reader} container={messages} scrollLock={scrollLock} clearAnchor={releaseAnchor} />}
           <div
@@ -649,6 +653,7 @@ function ChatView({
                 sendDraft(event.ctrlKey || (isMac && event.metaKey) ? undefined : "interrupt");
               }}
             />
+            <VoiceControl state={voice} command={action => bridge.send({ type: 'beings:voice-action', action })}/>
             <ComposerAddMenu state={state} onUpload={() => fileInput.current?.click()} onSelect={() => requestAnimationFrame(() => composer.current?.focus())}
               onConfigureSubagent={configureSubagent}
               onEnableSubagent={parent !== window && location.protocol === 'beings:' ? () => { void enableSubagent(); } : undefined}

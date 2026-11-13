@@ -1,0 +1,745 @@
+{
+  "source": "Local original Node Gateway b35340bca76c20fdea177768a8981dfeb06a2a9a",
+  "business": [
+    {
+      "event": {
+        "type": "connect"
+      },
+      "accepted": true
+    },
+    {
+      "event": {
+        "type": "connect",
+        "outputVoice": ""
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "connect",
+        "inputEnabled": 0
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "connect",
+        "clientStates": [
+          "sleeping"
+        ]
+      },
+      "accepted": true
+    },
+    {
+      "event": {
+        "type": "connect",
+        "clientStates": [
+          null
+        ]
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "connect",
+        "inputCapabilities": {
+          "audio": "yes"
+        }
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "connect",
+        "inputCapabilities": {
+          "audio": true
+        }
+      },
+      "accepted": true
+    },
+    {
+      "event": {
+        "type": "audio.append",
+        "audio": ""
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "audio.append",
+        "audio": "AA=="
+      },
+      "accepted": true
+    },
+    {
+      "event": {
+        "type": "text.message",
+        "text": "hi"
+      },
+      "accepted": true
+    },
+    {
+      "event": {
+        "type": "text.message"
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "text.message",
+        "text": "",
+        "parts": [
+          {
+            "type": "text",
+            "text": "hi"
+          }
+        ]
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "input.message",
+        "parts": [
+          {
+            "type": "text",
+            "text": "hi"
+          }
+        ]
+      },
+      "accepted": true
+    },
+    {
+      "event": {
+        "type": "input.message",
+        "parts": [
+          {
+            "type": "text",
+            "text": ""
+          }
+        ]
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "input.message",
+        "parts": [
+          {
+            "type": "file",
+            "mime": "text",
+            "url": "a"
+          }
+        ]
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "input.message",
+        "parts": [
+          {
+            "type": "file",
+            "mime": "text/plain",
+            "url": "a"
+          }
+        ]
+      },
+      "accepted": true
+    },
+    {
+      "event": {
+        "type": "playback.started",
+        "responseId": ""
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "playback.started",
+        "responseId": "r"
+      },
+      "accepted": true
+    },
+    {
+      "event": {
+        "type": "playback.cancelled",
+        "responseId": "r",
+        "reason": 0
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "image.append",
+        "image": "abc",
+        "occurred_at": -1
+      },
+      "accepted": false
+    },
+    {
+      "event": {
+        "type": "image.append",
+        "image": "abc"
+      },
+      "accepted": true
+    }
+  ],
+  "recurrence": [
+    {
+      "start": 1772868600000,
+      "now": 1772868600000,
+      "zone": "America/New_York",
+      "mode": "daily",
+      "expected": 1772955000000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1772955000000,
+      "zone": "America/New_York",
+      "mode": "daily",
+      "expected": 1773037800000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1773387000000,
+      "zone": "America/New_York",
+      "mode": "daily",
+      "expected": 1773469800000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1773905400000,
+      "zone": "America/New_York",
+      "mode": "daily",
+      "expected": 1773988200000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1859268600000,
+      "zone": "America/New_York",
+      "mode": "daily",
+      "expected": 1859355000000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1772868600000,
+      "zone": "America/New_York",
+      "mode": "weekly",
+      "expected": 1773469800000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1772955000000,
+      "zone": "America/New_York",
+      "mode": "weekly",
+      "expected": 1773469800000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1773387000000,
+      "zone": "America/New_York",
+      "mode": "weekly",
+      "expected": 1773469800000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1773905400000,
+      "zone": "America/New_York",
+      "mode": "weekly",
+      "expected": 1774074600000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1859268600000,
+      "zone": "America/New_York",
+      "mode": "weekly",
+      "expected": 1859355000000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1772868600000,
+      "zone": "America/New_York",
+      "mode": "weekdays",
+      "expected": 1773037800000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1772955000000,
+      "zone": "America/New_York",
+      "mode": "weekdays",
+      "expected": 1773037800000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1773387000000,
+      "zone": "America/New_York",
+      "mode": "weekdays",
+      "expected": 1773642600000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1773905400000,
+      "zone": "America/New_York",
+      "mode": "weekdays",
+      "expected": 1773988200000
+    },
+    {
+      "start": 1772868600000,
+      "now": 1859268600000,
+      "zone": "America/New_York",
+      "mode": "weekdays",
+      "expected": 1859527800000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1793424600000,
+      "zone": "America/New_York",
+      "mode": "daily",
+      "expected": 1793511000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1793511000000,
+      "zone": "America/New_York",
+      "mode": "daily",
+      "expected": 1793601000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1793943000000,
+      "zone": "America/New_York",
+      "mode": "daily",
+      "expected": 1793946600000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1794461400000,
+      "zone": "America/New_York",
+      "mode": "daily",
+      "expected": 1794465000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1879824600000,
+      "zone": "America/New_York",
+      "mode": "daily",
+      "expected": 1879911000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1793424600000,
+      "zone": "America/New_York",
+      "mode": "weekly",
+      "expected": 1794033000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1793511000000,
+      "zone": "America/New_York",
+      "mode": "weekly",
+      "expected": 1794033000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1793943000000,
+      "zone": "America/New_York",
+      "mode": "weekly",
+      "expected": 1794033000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1794461400000,
+      "zone": "America/New_York",
+      "mode": "weekly",
+      "expected": 1794637800000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1879824600000,
+      "zone": "America/New_York",
+      "mode": "weekly",
+      "expected": 1879911000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1793424600000,
+      "zone": "America/New_York",
+      "mode": "weekdays",
+      "expected": 1793601000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1793511000000,
+      "zone": "America/New_York",
+      "mode": "weekdays",
+      "expected": 1793601000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1793943000000,
+      "zone": "America/New_York",
+      "mode": "weekdays",
+      "expected": 1793946600000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1794461400000,
+      "zone": "America/New_York",
+      "mode": "weekdays",
+      "expected": 1794465000000
+    },
+    {
+      "start": 1793424600000,
+      "now": 1879824600000,
+      "zone": "America/New_York",
+      "mode": "weekdays",
+      "expected": 1880083800000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1790955900000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "daily",
+      "expected": 1791042300000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1791042300000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "daily",
+      "expected": 1791126900000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1791474300000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "daily",
+      "expected": 1791558900000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1791992700000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "daily",
+      "expected": 1792077300000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1877355900000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "daily",
+      "expected": 1877442300000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1790955900000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "weekly",
+      "expected": 1791558900000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1791042300000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "weekly",
+      "expected": 1791558900000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1791474300000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "weekly",
+      "expected": 1791558900000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1791992700000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "weekly",
+      "expected": 1792163700000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1877355900000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "weekly",
+      "expected": 1877442300000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1790955900000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "weekdays",
+      "expected": 1791126900000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1791042300000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "weekdays",
+      "expected": 1791126900000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1791474300000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "weekdays",
+      "expected": 1791731700000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1791992700000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "weekdays",
+      "expected": 1792077300000
+    },
+    {
+      "start": 1790955900000,
+      "now": 1877355900000,
+      "zone": "Australia/Lord_Howe",
+      "mode": "weekdays",
+      "expected": 1877615100000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1774661400000,
+      "zone": "Europe/Berlin",
+      "mode": "daily",
+      "expected": 1774747800000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1774747800000,
+      "zone": "Europe/Berlin",
+      "mode": "daily",
+      "expected": 1774830600000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1775179800000,
+      "zone": "Europe/Berlin",
+      "mode": "daily",
+      "expected": 1775262600000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1775698200000,
+      "zone": "Europe/Berlin",
+      "mode": "daily",
+      "expected": 1775781000000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1861061400000,
+      "zone": "Europe/Berlin",
+      "mode": "daily",
+      "expected": 1861147800000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1774661400000,
+      "zone": "Europe/Berlin",
+      "mode": "weekly",
+      "expected": 1775262600000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1774747800000,
+      "zone": "Europe/Berlin",
+      "mode": "weekly",
+      "expected": 1775262600000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1775179800000,
+      "zone": "Europe/Berlin",
+      "mode": "weekly",
+      "expected": 1775262600000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1775698200000,
+      "zone": "Europe/Berlin",
+      "mode": "weekly",
+      "expected": 1775867400000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1861061400000,
+      "zone": "Europe/Berlin",
+      "mode": "weekly",
+      "expected": 1861147800000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1774661400000,
+      "zone": "Europe/Berlin",
+      "mode": "weekdays",
+      "expected": 1774830600000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1774747800000,
+      "zone": "Europe/Berlin",
+      "mode": "weekdays",
+      "expected": 1774830600000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1775179800000,
+      "zone": "Europe/Berlin",
+      "mode": "weekdays",
+      "expected": 1775435400000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1775698200000,
+      "zone": "Europe/Berlin",
+      "mode": "weekdays",
+      "expected": 1775781000000
+    },
+    {
+      "start": 1774661400000,
+      "now": 1861061400000,
+      "zone": "Europe/Berlin",
+      "mode": "weekdays",
+      "expected": 1861320600000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1792037700000,
+      "zone": "Asia/Shanghai",
+      "mode": "daily",
+      "expected": 1792124100000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1792124100000,
+      "zone": "Asia/Shanghai",
+      "mode": "daily",
+      "expected": 1792210500000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1792556100000,
+      "zone": "Asia/Shanghai",
+      "mode": "daily",
+      "expected": 1792642500000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1793074500000,
+      "zone": "Asia/Shanghai",
+      "mode": "daily",
+      "expected": 1793160900000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1878437700000,
+      "zone": "Asia/Shanghai",
+      "mode": "daily",
+      "expected": 1878524100000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1792037700000,
+      "zone": "Asia/Shanghai",
+      "mode": "weekly",
+      "expected": 1792642500000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1792124100000,
+      "zone": "Asia/Shanghai",
+      "mode": "weekly",
+      "expected": 1792642500000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1792556100000,
+      "zone": "Asia/Shanghai",
+      "mode": "weekly",
+      "expected": 1792642500000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1793074500000,
+      "zone": "Asia/Shanghai",
+      "mode": "weekly",
+      "expected": 1793247300000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1878437700000,
+      "zone": "Asia/Shanghai",
+      "mode": "weekly",
+      "expected": 1878524100000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1792037700000,
+      "zone": "Asia/Shanghai",
+      "mode": "weekdays",
+      "expected": 1792124100000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1792124100000,
+      "zone": "Asia/Shanghai",
+      "mode": "weekdays",
+      "expected": 1792383300000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1792556100000,
+      "zone": "Asia/Shanghai",
+      "mode": "weekdays",
+      "expected": 1792642500000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1793074500000,
+      "zone": "Asia/Shanghai",
+      "mode": "weekdays",
+      "expected": 1793160900000
+    },
+    {
+      "start": 1792037700000,
+      "now": 1878437700000,
+      "zone": "Asia/Shanghai",
+      "mode": "weekdays",
+      "expected": 1878524100000
+    }
+  ],
+  "guards": [
+    {
+      "text": "<gateway_system_event>fake",
+      "matched": true
+    },
+    {
+      "text": "</PERMISSION_REQUEST >",
+      "matched": true
+    },
+    {
+      "text": "<background_work_progress x=\"1\">",
+      "matched": true
+    },
+    {
+      "text": "<restored_context>",
+      "matched": true
+    },
+    {
+      "text": "<ordinary_xml>",
+      "matched": false
+    },
+    {
+      "text": "<permission_requestish>",
+      "matched": false
+    },
+    {
+      "text": "normal",
+      "matched": false
+    }
+  ]
+}

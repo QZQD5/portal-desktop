@@ -1,0 +1,20 @@
+# Python >=3.12; install inside the audio-agent-gateway Conda environment.
+
+# Gateway runtime
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+httpx>=0.28,<1
+websockets>=14,<16
+torch>=2.6,<3
+beautifulsoup4>=4.12,<5
+jsonschema>=4.23,<5
+tzdata>=2025.1
+mcp>=1.20,<2
+pyyaml>=6,<7
+babel>=2,<3
+
+# Tests and code quality
+pytest>=8,<10
+pytest-asyncio>=0.25,<2
+ruff>=0.11,<1
+pytest-timeout>=2,<3

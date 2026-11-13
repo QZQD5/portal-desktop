@@ -4,7 +4,7 @@ import type { ChatState } from '../models/chat';
 import { HistoryCache, normalizeHistoryRows } from './history-cache';
 
 /** Read all cached scenes, independently of the selected scene/visible window. */
-export async function localActivityHistory(cache: HistoryCache, state: ChatState): Promise<RecentChatMessage[]> {
+export async function localActivityHistory(cache: Pick<HistoryCache, 'readBefore'>, state: ChatState): Promise<RecentChatMessage[]> {
   const cached = await cache.readBefore(Infinity, 100, isHistoryQuestion);
   const loaded = state.items.flatMap(item => item.kind === 'message' && item.historySeq && item.role === 'user' ? [{
     seq: item.historySeq, role: item.role, content: item.text,

@@ -28,17 +28,15 @@ export function RecentHistory({ app, visible = true }: { app: AppModel; visible?
       const failed = (source: 'local' | 'remote', error: string) => {
         if (active) setErrors(previous => ({ ...previous, [source]: error }));
       };
-      // Independent reads let cached questions appear while history is slow or offline.
+      // Both the transcript and activity list read the Gateway-owned local archive.
       await Promise.allSettled([
-        app.chatLoading ? Promise.resolve() : app.localHistory.read(endpoint, abort.signal)
-          .then(rows => receive('local', rows), () => failed('local', '本地对话读取失败，请重试。')),
         (async () => {
           if (typeof app.api.recentChatHistory !== 'function') {
             failed('remote', '客户端接口已更新，请重新打开客户端后查看场景动态。');
             return;
           }
           try { receive('remote', await app.api.recentChatHistory(endpoint)); }
-          catch { failed('remote', '网络历史读取失败，已保留可用对话。'); }
+          catch { failed('remote', '本地 Gateway 历史读取失败，请重试。'); }
         })(),
       ]);
       reading = false; if (active) setLoading(false);

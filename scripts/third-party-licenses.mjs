@@ -8,7 +8,7 @@ export async function writeThirdPartyLicenses(destination, modules) {
     const match = [...normalized.matchAll(/(?:^|\/)node_modules\/(?:@[^/]+\/)?[^/]+/g)].at(-1);
     return match ? [normalized.slice(0, match.index + match[0].length)] : [];
   }));
-  const notices = [];
+  const notices = [await readFile('desktop/renderer/voice/LICENSE.txt', 'utf8')];
   for (const root of [...roots].sort()) {
     const metadata = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
     const license = (await readdir(root)).find(file => /^licen[sc]e(?:\.|$)/i.test(file));
