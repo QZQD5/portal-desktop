@@ -17,7 +17,7 @@ export async function verifyBeingConnection(connection: Connection | null, fetch
       while (true) {
         const next = await reader.read(); if (next.done) break;
         size += next.value.byteLength;
-        if (size > 64_000) throw new Error('Being 状态响应无效，Portal 未启动。');
+        if (size > 1024 * 1024) throw new Error('Being 状态响应过大（超过 1 MiB），Portal 未启动。');
         chunks.push(next.value);
       }
     } finally { await reader.cancel().catch(() => {}); }

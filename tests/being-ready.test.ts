@@ -11,7 +11,7 @@ it('requires saved configuration and an authenticated Being status response', as
   expect(fetcher).toHaveBeenCalledWith('https://example.org/willow/api/status?token=private-token',
     expect.objectContaining({ redirect: 'error', credentials: 'omit', signal: expect.any(AbortSignal) }));
 });
-it('blocks unauthenticated, unreachable, invalid and oversized responses without leaking credentials', async () => {
+it('blocks unauthenticated, unreachable and invalid responses without leaking credentials', async () => {
   for (const response of [new Response('', { status: 401 }), new Response('', { status: 403 }),
     new Response('', { status: 503 }), new Response('<html>Sign in</html>'), Response.json({}), new Response('x'.repeat(64_001))]) {
     await expect(verifyBeingConnection(connection, async () => response)).rejects.toThrow('Portal 未启动');
@@ -19,4 +19,32 @@ it('blocks unauthenticated, unreachable, invalid and oversized responses without
   const failed = async () => { throw new Error('fetch https://example.org/?token=private-token failed'); };
   await expect(verifyBeingConnection(connection, failed)).rejects.toThrow('无法验证 Being 连接');
   await expect(verifyBeingConnection(connection, failed)).rejects.not.toThrow('private-token');
+});
+
+it.each([64_001, 1024 * 1024])('accepts a valid status response of %i bytes', async size => {
+  const status = { being_name: '柳树', detail: '' };
+  status.detail = 'x'.repeat(size - Buffer.byteLength(JSON.stringify(status)));
+  const body = JSON.stringify(status);
+  expect(Buffer.byteLength(body)).toBe(size);
+  await expect(verifyBeingConnection(connection, async () => new Response(body))).resolves.toBeUndefined();
+});
+
+it('rejects and cancels a chunked response exceeding 1 MiB by one byte', async () => {
+  const limit = 1024 * 1024;
+  const status = { being_name: '柳树', detail: '' };
+  status.detail = 'x'.repeat(limit + 1 - Buffer.byteLength(JSON.stringify(status)));
+  const body = new TextEncoder().encode(JSON.stringify(status));
+  const cancel = vi.fn();
+  const response = new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      // 分块累计超过上限时应停止读取，即使完整正文是合法 JSON。
+      controller.enqueue(body.subarray(0, limit / 2));
+      controller.enqueue(body.subarray(limit / 2, limit));
+      controller.enqueue(body.subarray(limit));
+    },
+    cancel,
+  }));
+  await expect(verifyBeingConnection(connection, async () => response))
+    .rejects.toThrow('Being 状态响应过大（超过 1 MiB），Portal 未启动。');
+  expect(cancel).toHaveBeenCalledOnce();
 });
