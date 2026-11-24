@@ -117,6 +117,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           echo "PORTAL_DESKTOP_MAC_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
       - run: npm ci
+      - uses: ./.github/actions/gateway-build-env
       - run: npm run typecheck
       - run: npm run build:portal
       - run: npm test

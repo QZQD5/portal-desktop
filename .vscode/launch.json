@@ -6,6 +6,9 @@
       "type": "node-terminal",
       "request": "launch",
       "command": "npm start -- --inspect-electron",
+      "windows": {
+        "command": "npm.cmd start -- --inspect-electron"
+      },
       "cwd": "${workspaceFolder}",
       "autoAttachChildProcesses": true,
       "env": {

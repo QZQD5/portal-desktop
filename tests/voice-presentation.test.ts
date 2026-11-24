@@ -159,6 +159,17 @@ it('orders archived voice bubbles by the same timestamp displayed on them', () =
   expect(rows.map(row => row.timestamp)).toEqual(['17:46:36', '17:46:39', '17:46:40']);
 });
 
+it('hides only the archived agent result for a task whose output was discarded', () => {
+  const f = fixture();
+  f.receive({ type: 'task.snapshot', tasks: [{ id: 'cancelled', status: 'cancelled', objective: '任务', discard_output: true }] });
+  const rows = voiceMessages([
+    { ...f.message('agent:cancelled', '已丢弃的结果'), voicePending: false },
+    { ...f.message('voice:cancelled', '另一个语音回复'), voicePending: false },
+    { ...f.message('ordinary', '普通文字回复'), voiceKey: undefined },
+  ], f.state());
+  expect(rows.flatMap(row => row.kind === 'message' ? [row.text] : [])).toEqual(['另一个语音回复', '普通文字回复']);
+});
+
 it('projects delegated task activity immediately above its spoken result', () => {
   const f = fixture();
   f.receive({ type: 'task.snapshot', tasks: [{

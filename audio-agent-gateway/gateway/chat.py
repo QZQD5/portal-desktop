@@ -37,6 +37,10 @@ class Chat:
         self.callback_discovery = asyncio.Lock()
 
     def start(self):
+        if self.current and self.current.get("voice_stop_status") == "cancelling":
+            # The previous process cannot deliver its outstanding stop receipt.
+            self.current["voice_stop_status"] = "stop_unconfirmed"
+            self.save()
         if self.current and not self.current.get("finished"):
             if self.current.get("routed"):
                 # Old local-router streams: only wait for an already submitted task.
@@ -197,6 +201,11 @@ class Chat:
             self.history.save_chat(current)
 
     async def sync_context(self, current, feedback=None, *, scene=None):
+        if current.get("voice_stop_status") and current["finished"] and (current.get("stopped") or not pending(current)):
+            current.pop("voice_stop_status")
+            self.save(current)
+            await self.notify_voice_stop(current, {"type": "text.stop.resolved",
+                                                  "status": "stopped" if current.get("stopped") else "ended"})
         if current.get("discard_output") or self.callback_discarded(current):
             feedback = None
         if (self.tasks and feedback and feedback.get("final") and feedback.get("text")
@@ -525,6 +534,8 @@ class Chat:
         if receipt and not (isinstance(receipt.get("status"), int) and receipt["status"] >= 400):
             return Response(status_code=202)
         if self.current and self.current.get("discard_output") and not self.current["finished"]:
+            if self.current.get("voice_stop_status") == "stop_unconfirmed":
+                return JSONResponse({"error": "上一条文字请求尚未确认停止，请再次取消，或等它结束后再发送。"}, 409)
             return JSONResponse({"error": "上一条文字请求仍在结束，请稍后发送。"}, 409)
         if self.before_send:
             await self.before_send(body["scene_id"], request_id)
@@ -663,17 +674,23 @@ class Chat:
                 and (not current["finished"] or pending(current))):
             return current
 
+    async def notify_voice_stop(self, current, event):
+        session = self.gateway.active if self.gateway else None
+        if session and session.settings.being_scene.get("scene_id") == current.get("reply_scene", current["scene"])["scene_id"]:
+            await session.emit({**event, "streamId": current["stream_id"]})
+
     def start_voice_stop(self, stream_id, scene_id, order):
         current = self.voice_stop_target(stream_id, scene_id, order)
         if not current:
             return False
-        self.discard_voice_output(current)
-        if stream_id not in self.voice_stops:
+        if stream_id not in self.voice_stops or current.get("voice_stop_status") == "stop_unconfirmed":
+            self.discard_voice_output(current)
             job = asyncio.create_task(self.stop_voice_when_ready(stream_id, scene_id, order))
             self.voice_stops[stream_id] = job
 
             def finished(done):
-                self.voice_stops.pop(stream_id, None)
+                if self.voice_stops.get(stream_id) is done:
+                    self.voice_stops.pop(stream_id)
                 if not done.cancelled():
                     done.exception()
 
@@ -681,8 +698,8 @@ class Chat:
         return True
 
     def discard_voice_output(self, current):
-        if not current.get("discard_output"):
-            current.update(discard_output=True, text="", progress="")
+        if current.get("voice_stop_status") != "cancelling":
+            current.update(discard_output=True, text="", progress="", voice_stop_status="cancelling")
             self.save(current)
 
     async def stop_voice_when_ready(self, stream_id, scene_id, order):
@@ -691,8 +708,17 @@ class Chat:
                 while (current := self.voice_stop_target(stream_id, scene_id, order)) and not current.get("upstream_id"):
                     await asyncio.sleep(0.1)
         except TimeoutError:
-            return
-        await self.stop_voice(stream_id, scene_id, order)
+            pass  # A missing upstream stream ID has the same outcome as an unconfirmed stop.
+        else:
+            await self.stop_voice(stream_id, scene_id, order)
+        current = self.voice_stop_target(stream_id, scene_id, order)
+        if current and not current.get("stopped"):
+            current["voice_stop_status"] = "stop_unconfirmed"
+            self.save(current)
+            message = "文字请求尚未确认停止，可以再次取消。"
+            await self.notify_voice_stop(current, {"type": "error", "message": message,
+                                                  "error": {"code": "stop_unconfirmed", "message": message}})
+            await self.sync_context(current)
 
     async def stop_voice(self, stream_id, scene_id, order):
         async with self.admission:

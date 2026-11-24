@@ -139,6 +139,19 @@ test('still applies the default sink when silent AudioSinkOptions are unsupporte
   assert.deepEqual(context.sinks, [{ type: 'none' }, ''])
 })
 
+test('restores a running capture clock suspended by an output switch', async () => {
+  const context = {
+    state: 'running',
+    async setSinkId() { this.state = 'suspended' },
+    async resume() { this.state = 'running' },
+  }
+  assert.equal(await followDefaultAudioOutput(context), true)
+  assert.equal(context.state, 'running')
+  context.state = 'suspended'
+  assert.equal(await followDefaultAudioOutput(context), true)
+  assert.equal(context.state, 'suspended')
+})
+
 test('leaves a closed or sink-less context unchanged', async () => {
   assert.equal(await followDefaultAudioOutput({ state: 'closed', setSinkId: async () => {} }), false)
   assert.equal(await followDefaultAudioOutput({ state: 'running' }), false)

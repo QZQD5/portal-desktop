@@ -302,6 +302,43 @@ describe("React chat runtime lifecycle", () => {
     }
   });
 
+  it("retries the original desktop send once while another reply is streaming", async () => {
+    vi.stubGlobal("location", new URL("beings://chat/loom.html?scene_id=fixture"));
+    const attempts: string[] = [];
+    let online = false;
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      if (!url.includes("/chat/stream")) return response({ messages: [] });
+      const body = JSON.parse(String(init.body));
+      if (body.message === "第一条") {
+        attempts.push(body.client_request_id);
+        if (!online) throw new TypeError("offline");
+        return new Response(null, {status: 202});
+      }
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) { stream = controller; } }));
+    });
+    const state = new ChatState(), runtime = createChatRuntime(state);
+    try {
+      const initial = runtime.send("第一条");
+      await vi.advanceTimersByTimeAsync(7100);
+      await initial;
+      const failure = state.items.find(item => item.kind === "message" && item.retryLabel === "重试");
+      if (failure?.kind !== "message" || !failure.retry) throw new Error("Expected manual retry");
+      online = true;
+      const other = runtime.send("第二条");
+      await flush();
+      state.draft = "刚输入的草稿";
+      await failure.retry();
+      expect(attempts).toHaveLength(5);
+      expect(attempts[0]).toEqual(expect.any(String));
+      expect(new Set(attempts).size).toBe(1);
+      expect(state.items.filter(item => item.kind === "message" && item.role === "user" && item.text === "第一条")).toHaveLength(1);
+      expect(state.draft).toBe("刚输入的草稿");
+      stream.close();
+      await other;
+    } finally { runtime.dispose(); }
+  });
+
   it("preserves the draft and attachments when the desktop scene is unavailable", async () => {
     vi.stubGlobal("location", new URL("beings://chat/"));
     const fetch = vi.fn();

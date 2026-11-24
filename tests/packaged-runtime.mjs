@@ -20,9 +20,12 @@ try {
   const fixture = path.join(directory, 'runtime.cjs');
   await cp(fileURLToPath(new URL('./fixtures/packaged-runtime.cjs', import.meta.url)), fixture);
   const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) => !['PATH', 'NODE_PATH', 'NODE_OPTIONS'].includes(key.toUpperCase())));
-  execFileSync(installed, [fixture, resources], { cwd: directory, stdio: 'inherit', timeout: 60000,
+  const runOptions = { cwd: directory, stdio: 'inherit', timeout: 90_000,
     env: { ...environment, ELECTRON_RUN_AS_NODE: '1', PATH: process.platform === 'win32'
-      ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin' } });
+      ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin' } };
+  execFileSync(installed, [fixture, resources], runOptions);
+  if (process.platform === 'darwin' || process.platform === 'win32')
+    execFileSync(installed, [fileURLToPath(new URL('./fixtures/packaged-gateway.cjs', import.meta.url)), resources], runOptions);
 
   // Reopen an existing profile with the old settings/plugin-record formats.
   const profile = path.join(directory, 'profile'), workspace = path.join(directory, '工作区');

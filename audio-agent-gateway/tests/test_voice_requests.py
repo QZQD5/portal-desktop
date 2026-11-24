@@ -50,12 +50,16 @@ async def call(session, rid, name, arguments):
 
 def model_tool(monkeypatch, provider, tools):
     reply = provider.reply
+    calls = {}
 
     async def call_tool(ws, state, *, native=False):
         if not native or state["text"] not in tools:
             return await reply(ws, state, native=native)
         name, arguments = tools[state["text"]]
         rid = "model-" + name
+        calls[name] = calls.get(name, 0) + 1
+        if calls[name] > 1:
+            rid += f"-{calls[name]}"
         state.update(active=rid, waiting_tool=True)
         await ws.send(json.dumps({
             "type": "response.function_call_arguments.done", "response_id": rid,

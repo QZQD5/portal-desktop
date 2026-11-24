@@ -47,7 +47,7 @@ async function stopManual() {
   }
 }
 const requests = [], speech = [], cancelledResponses = [], stoppedTasks = [];
-let mode = 'hello', needTurn = true, audioInputs = 0, heldResponse = '';
+let mode = 'hello', needTurn = false, audioInputs = 0, heldResponse = '';
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   assert.equal(url.searchParams.get('token'), 'heart-test-key');
@@ -156,6 +156,8 @@ try {
     env: { ...process.env, PORTAL_DESKTOP_USER_DATA: profile, PORTAL_DESKTOP_VOICE_PROVIDER_URL: `ws://127.0.0.1:${wss.address().port}`,
       PORTAL_DESKTOP_GATEWAY_URL: origin, DOUBAO_API_KEY: external ? '' : 'voice-test-key' } });
   const page = await app.firstWindow();
+  const waitForReply = (text, timeout) => page.waitForFunction(expected =>
+    window.voiceState.presentation?.messages.some(row => row.visible && row.text.includes(expected)), text, { timeout });
   await page.evaluate(() => {
     window.audioStops = 0; window.audioStarted = 0; window.activeAudio = new Set();
     window.voiceEvents = []; window.audioStartsByResponse = {};
@@ -178,22 +180,42 @@ try {
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   assert.equal(await page.getByRole('button', { name: '语音设置' }).count(), 0);
   assert.equal(await page.locator('input[type=password]').count(), 0);
+  await page.evaluate(() => {
+    navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Fixture has no microphone', 'NotFoundError'); };
+  });
   await page.getByRole('button', { name: '开启语音通话' }).click();
+  await page.getByText('麦克风暂不可用，正在重试…', { exact: true }).waitFor({ timeout: 60000 });
+  await page.getByText('麦克风不可用，请检查输入设备', { exact: true }).waitFor();
+  assert.equal(audioInputs, 0);
+  await page.evaluate(() => {
+    delete navigator.mediaDevices.getUserMedia;
+    navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
+  });
   await page.getByText('正在聆听', { exact: true }).waitFor({ timeout: 60000 });
-  await page.waitForFunction(() => window.voiceState.transcript.includes('你好，实时语音已经连接。'));
+  needTurn = true;
+  await page.getByText('你：hello', { exact: true }).waitFor();
+  await waitForReply('你好，实时语音已经连接。');
   assert.equal(await page.locator('.voice-panel, .voice-popover').count(), 0);
   assert.ok(audioInputs > 0, 'AudioWorklet sends microphone PCM');
   await page.waitForFunction(() => window.audioStarted > 0 && window.activeAudio.size === 0);
+  const [provider] = wss.clients;
+  const draft = { item_id: 'discarded-draft' };
+  provider.send(JSON.stringify({ ...draft, type: 'conversation.item.input_audio_transcription.started' }));
+  provider.send(JSON.stringify({ ...draft, type: 'conversation.item.input_audio_transcription.delta', delta: '临时转写' }));
+  await page.getByText('你：临时转写', { exact: true }).waitFor();
+  provider.send(JSON.stringify({ ...draft, type: 'conversation.item.input_audio_transcription.failed' }));
+  await page.getByText('你：hello', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.voiceState.userTranscripts.some(row => row.text === '临时转写')), false);
   mode = 'delegate'; needTurn = true;
   await page.waitForFunction(() => window.voiceState.task.includes('任务已经由 Being 完成。'));
-  await page.waitForFunction(() => window.voiceState.transcript.includes('任务已经由 Being 完成。'));
+  await waitForReply('任务已经由 Being 完成。', 55000);
   assert.equal(requests.length, 1); assert.equal(requests[0].scene_id, 'fixture-scene');
   assert.ok(speech.some(text => text.includes('任务已经由 Being 完成。')));
   await page.waitForFunction(() => window.voiceEvents.some(event => event.type === 'task.notification.delivered'), undefined, { timeout: 55000 });
   assert.equal(speech.filter(text => text === '任务已经由 Being 完成。').length, 1, 'Long results are delivered without restarting TTS');
   assert.equal(await page.evaluate(() => window.audioStops), 0, 'Long speech reaches playback.ended without being cleared');
   mode = 'hold'; needTurn = true;
-  await page.waitForFunction(() => window.voiceState.transcript.includes('正在播报长回复'));
+  await waitForReply('正在播报长回复');
   await page.waitForFunction(() => window.activeAudio.size > 0);
   const stops = await page.evaluate(() => window.audioStops);
   const heldStarts = await page.evaluate(id => window.audioStartsByResponse[id], heldResponse);
@@ -223,11 +245,13 @@ try {
     await stopManual();
     await page.getByRole('button', { name: '开启语音通话' }).waitFor();
     assert.equal(await startManual(Number(new URL(origin).port)), origin);
-    mode = 'hello'; needTurn = true;
+    mode = 'hello';
     const previousSpeech = speech.length;
     await page.getByRole('button', { name: '开启语音通话' }).click();
     await page.getByText('正在聆听', { exact: true }).waitFor();
-    await page.waitForFunction(() => window.voiceState.transcript.includes('你好，实时语音已经连接。'));
+    needTurn = true;
+    await page.getByText('你：hello', { exact: true }).waitFor();
+    await waitForReply('你好，实时语音已经连接。');
     assert.ok(speech.length > previousSpeech, 'Audio works again after a manual Gateway restart');
     await app.close(); app = undefined;
     assert.equal(manual.exitCode, null); assert.equal(manual.signalCode, null);

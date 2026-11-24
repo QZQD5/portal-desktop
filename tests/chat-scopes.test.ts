@@ -205,7 +205,7 @@ describe("scene history refresh", () => {
 
   it("preserves the global cross-scene cue across a manual network retry", async () => {
     vi.stubGlobal("location", new URL("beings://chat/loom.html?scene_id=desktop-test&scene_label=桌面·测试机"));
-    const requests: string[] = [];
+    const requests: { message: string; client_request_id: string }[] = [];
     let online = false;
     vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
       const route = new URL(input).pathname;
@@ -213,7 +213,7 @@ describe("scene history refresh", () => {
       if (route === "/api/stream/active") return new Response(null, { status: 204 });
       if (route === "/health") return new Response("OK fixture");
       if (route === "/api/chat/stream") {
-        requests.push(JSON.parse(String(init?.body)).message);
+        requests.push(JSON.parse(String(init?.body)));
         if (!online) throw new TypeError("offline");
         return new Response('event: content_block_delta\ndata: {"scene_id":"desktop-test","delta":{"text":"收到"}}\n\nevent: message_stop\ndata: {"scene_id":"desktop-test"}\n\n', { headers: { "Content-Type": "text/event-stream" } });
       }
@@ -244,7 +244,9 @@ describe("scene history refresh", () => {
       await vi.advanceTimersByTimeAsync(20);
       await retrying;
       const expected = "【新消息来自 scene「桌面·测试机 · ID: desktop-test」】\n\n保留正文";
-      expect(requests).toEqual([expected, expected, expected, expected, expected]);
+      expect(requests.map(request => request.message)).toEqual([expected, expected, expected, expected, expected]);
+      expect(requests[0].client_request_id).toEqual(expect.any(String));
+      expect(new Set(requests.map(request => request.client_request_id)).size).toBe(1);
       expect(state.items.filter(item => item.kind === "message" && item.role === "user" && item.text === "保留正文")).toHaveLength(1);
       expect(state.items.some(item => item.kind === "message" && item.role === "user" && item.text === expected)).toBe(false);
     } finally { runtime.dispose(); }

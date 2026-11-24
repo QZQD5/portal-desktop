@@ -134,6 +134,7 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
     if (!disposed && !drainTimer) drainTimer = setTimeout(() => { drainTimer = null; scheduleDrain(); }, 2000);
   }
   function attachQueued(target: any, entry: any, saved: any, persisted = true) {
+    entry.sendOptions = { ...entry.sendOptions, clientRequestId: saved.id };
     const queued = { session: target, entry, saved, persisted, claimed: false, cancelled: false, controller: new AbortController() };
     if (saved.attachment?.messageId) entry.message.attachmentEndpoint = queueStore.endpoint;
     sendQueue.push(queued);

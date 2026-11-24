@@ -25,8 +25,13 @@ export function VoiceControl({ state, command }: { state: VoiceState; command(ac
 export function VoiceActivity({ state, command }: { state: VoiceState; command(action: VoiceAction): void }) {
   const active = state.state === 'ready' || state.state === 'connecting';
   if (!active && !state.error) return null;
-  const label = state.state === 'connecting' ? '正在连接…' : state.muted ? '收音已暂停，回复仍会播放' : '正在聆听';
-  const userTranscript = state.userTranscript || '';
+  const capture = state.microphone ?? 'ready';
+  const captureLabel = {
+    starting: '正在打开麦克风…', recovering: '麦克风暂不可用，正在重试…',
+    unavailable: '麦克风不可用，请检查输入设备', ready: '正在聆听',
+  }[capture];
+  const label = state.state === 'connecting' ? '正在连接…' : state.muted ? '收音已暂停，回复仍会播放' : captureLabel;
+  const userTranscript = state.state === 'ready' && capture === 'ready' && !state.muted && state.userTranscript;
   return <div className="voice-activity">
     {state.state === 'ready' && <button type="button" aria-label="打断回复" title="打断回复" onClick={() => command('interrupt')}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true"><path d="M4 10v4m4-7v10m4-14v18m4-14v10m4-7v4"/></svg>

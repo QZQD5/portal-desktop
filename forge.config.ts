@@ -55,15 +55,15 @@ const config: ForgeConfig = {
     prePackage: async () => {
       execFileSync(process.execPath, ['scripts/check-desktop-dependencies.mjs'], { stdio: 'inherit' });
       if (!existsSync(binary)) throw new Error('Portal binary missing. Run npm run build:portal first.');
-      if (process.platform === 'win32') {
-        execFileSync(process.execPath, ['scripts/build-voice.mjs', '--source', path.resolve('audio-agent-gateway')], { stdio: 'inherit' });
+      if (process.platform === 'win32' || process.platform === 'darwin') {
+        execFileSync(process.execPath, ['scripts/build-voice.mjs', '--source', path.resolve('audio-agent-gateway'),
+          ...(process.platform === 'darwin' && !macLocalTest ? ['--codesign-identity', macIdentity] : [])], { stdio: 'inherit' });
+        const executable = process.platform === 'win32' ? 'AudioAgentGateway.exe' : 'AudioAgentGateway';
+        if (!existsSync(path.join(voiceRuntime, executable))) throw new Error('Python Gateway runtime missing.');
       } else {
         execFileSync(process.execPath, ['scripts/prepare-gateway.mjs', '--package'], { stdio: 'inherit' });
-      }
-      if (!existsSync(path.join(voiceRuntime, 'gateway', '__main__.py'))
-          && !existsSync(path.join(voiceRuntime, 'AudioAgentGateway.exe'))
-          && !existsSync(path.join(voiceRuntime, 'AudioAgentGateway'))) {
-        throw new Error('Python Gateway runtime missing.');
+        if (!existsSync(path.join(voiceRuntime, 'gateway', '__main__.py')) &&
+            !existsSync(path.join(voiceRuntime, 'AudioAgentGateway'))) throw new Error('Python Gateway runtime missing.');
       }
       if (process.platform === 'darwin') execFileSync(process.execPath, ['scripts/sign-macos-runtime.mjs'], { stdio: 'inherit' });
     },

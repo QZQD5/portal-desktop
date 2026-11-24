@@ -1228,7 +1228,7 @@ function createStreamRuntime(state: any, options: any): any {
     }
   }
 
-  function addNetworkFailureMessage(text: any, files: any, requestMessage: any) {
+  function addNetworkFailureMessage(text: any, files: any, requestMessage: any, clientRequestId?: string) {
     const scene = { ...state.activeScene };
     const message = addMessage("system", "⚠ 网络连接失败，请检查网络后重试", false, undefined, undefined, scene);
     message.retry = () => {
@@ -1236,7 +1236,7 @@ function createStreamRuntime(state: any, options: any): any {
         message.text = "请切换回这条消息所属的场景后重试。"; changed(); return;
       }
       removeMessage(message);
-      return send(text, files?.length ? files : null, { isManualRetry: true, requestMessage });
+      return send(text, files, { isManualRetry: true, requestMessage, clientRequestId });
     };
     message.retryLabel = "重试";
     changed();
@@ -1946,18 +1946,21 @@ function createStreamRuntime(state: any, options: any): any {
     return queuedMessage;
   }
 
-  async function spliceSend(text: any, files = pendingFiles, sendOptions: any = {}) {
+  async function spliceSend(text: any, files: typeof pendingFiles, sendOptions: any, clientRequestId?: string) {
     const replyBaseline = new Set(state.items);
     const submittedAt = Date.now();
     const interruptedOrigin = options.activeAutonomousOrigin?.();
     let spliceMsg = (text || "").trim();
     if (!spliceMsg && !files.length) return;
     timedOutReply = null;
-    spliceMsg = options.prepareMessage?.(spliceMsg || `[${files.length} file(s)]`) ?? spliceMsg;
-    const requestMessage = stripLocalFileContext(withComposerCommandContext((sendOptions.requestMessage ?? spliceMsg) || `[${files.length} file(s)]`, !!sendOptions.uiAction || (!!state.intelligentUIEnabled && (sendOptions.intelligentUI ?? state.intelligentUIForMessage)), sendOptions.uiSnapshot ?? state.intelligentUISnapshots?.[state.currentScene.sceneId || 'global'], sendOptions.uiAction));
-    const localMessage = ensureUserMessage(sendOptions.queuedMessage, spliceMsg || `[${files.length} file(s)]`);
-    noteLocalEcho("user", requestMessage, state.currentScene, localMessage, [spliceMsg]);
-    if (!sendOptions.uiAction && !sendOptions.queuedMessage) clearComposer();
+    let requestMessage: string = sendOptions.requestMessage;
+    if (!sendOptions.isManualRetry) {
+      spliceMsg = options.prepareMessage?.(spliceMsg || `[${files.length} file(s)]`) ?? spliceMsg;
+      requestMessage = stripLocalFileContext(withComposerCommandContext((sendOptions.requestMessage ?? spliceMsg) || `[${files.length} file(s)]`, !!sendOptions.uiAction || (!!state.intelligentUIEnabled && (sendOptions.intelligentUI ?? state.intelligentUIForMessage)), sendOptions.uiSnapshot ?? state.intelligentUISnapshots?.[state.currentScene.sceneId || 'global'], sendOptions.uiAction));
+      const localMessage = ensureUserMessage(sendOptions.queuedMessage, spliceMsg || `[${files.length} file(s)]`);
+      noteLocalEcho("user", requestMessage, state.currentScene, localMessage, [spliceMsg]);
+      if (!sendOptions.uiAction && !sendOptions.queuedMessage) clearComposer();
+    }
     let res;
     try {
       if (sendOptions.attachmentDelivery) await sendOptions.attachmentDelivery('sending');
@@ -1966,6 +1969,7 @@ function createStreamRuntime(state: any, options: any): any {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: requestMessage,
+          client_request_id: clientRequestId,
           session_id: sessionId,
           ...browserScenePayload(),
           ...(files.length
@@ -2010,7 +2014,7 @@ function createStreamRuntime(state: any, options: any): any {
       showThinkingIndicator();
       isStreaming = true;
       updateSendButton();
-      await driveChatStream(res, spliceMsg, [], requestMessage, !!sendOptions.attachmentDelivery);
+      await driveChatStream(res, spliceMsg, files, requestMessage, clientRequestId, !!sendOptions.attachmentDelivery);
       return;
     }
     // 非 200/202：主动排空 body，别让连接挂着
@@ -2036,8 +2040,10 @@ function createStreamRuntime(state: any, options: any): any {
       addMessage("system", "客户端场景不可用，暂时无法发送消息。请检查启动提示并重启客户端。");
       return;
     }
+    // Reuse the same ID for every attempt at one logical send through the desktop Gateway.
+    const clientRequestId = location.protocol === "beings:" ? sendOptions.clientRequestId ?? crypto.randomUUID() : undefined;
     if (isStreaming) {
-      await spliceSend(text, filesOverride || [...pendingFiles], sendOptions);
+      await spliceSend(text, filesOverride || [...pendingFiles], sendOptions, clientRequestId);
       return;
     }
     const replyBaseline = new Set(state.items);
@@ -2080,7 +2086,7 @@ function createStreamRuntime(state: any, options: any): any {
     isStreaming = true;
     updateSendButton();
 
-    const body: any = { message: requestMessage || `[Sent ${filesToSend.length} file(s)]`, ...browserScenePayload(sendingScene) };
+    const body: any = { message: requestMessage || `[Sent ${filesToSend.length} file(s)]`, client_request_id: clientRequestId, ...browserScenePayload(sendingScene) };
     if (sessionId) body.session_id = sessionId;
     if (filesToSend.length) {
       body.attachments = filesToSend.map((f) => ({
@@ -2120,7 +2126,7 @@ function createStreamRuntime(state: any, options: any): any {
         await sendOptions.attachmentDelivery('unknown');
         pendingReply = null; removeThinkingIndicator(); tuiClear();
         addMessage('system', '附件消息发送结果不确定，请先核对历史；不会自动重发。');
-      } else handleStreamError(e, msg, filesToSend, requestMessage);
+      } else handleStreamError(e, msg, filesToSend, requestMessage, clientRequestId);
       finalizeSendCleanup();
       return;
     }
@@ -2152,12 +2158,12 @@ function createStreamRuntime(state: any, options: any): any {
       return;
     }
 
-    await driveChatStream(res, msg, filesToSend, requestMessage, !!sendOptions.attachmentDelivery);
+    await driveChatStream(res, msg, filesToSend, requestMessage, clientRequestId, !!sendOptions.attachmentDelivery);
   }
 
   // 读取循环 + 统一的异常处理 + 统一的收尾。
   // send() 和 spliceSend() 都走这里，保证 isStreaming / 队列 / 按钮在任何路径上都能复位。
-  async function driveChatStream(res: any, msg: any, filesToSend: any, requestMessage = msg, attachmentAccepted = false) {
+  async function driveChatStream(res: any, msg: any, filesToSend: any, requestMessage: string, clientRequestId?: string, attachmentAccepted = false) {
     let handedOff = false;
     try {
       const result = await consumeChatStream(res);
@@ -2179,7 +2185,7 @@ function createStreamRuntime(state: any, options: any): any {
       return result;
     } catch (e: any) {
       if (attachmentAccepted) { addMessage('system', '附件消息已被接受，回复连接中断，请刷新历史查看后续回复。'); }
-      else handleStreamError(e, msg, filesToSend, requestMessage);
+      else handleStreamError(e, msg, filesToSend, requestMessage, clientRequestId);
       return { outcome: "aborted", streamId: lastStreamId, localSeq: liveSeq };
     } finally {
       if (renderTimer) {
@@ -2208,7 +2214,7 @@ function createStreamRuntime(state: any, options: any): any {
   // 统一的流异常处理。注意它**总是**让调用方走 finalizeSendCleanup()：
   // 断线恢复路径靠 pendingRecovery 让 finalizeSendCleanup 跳过队列 flush，
   // 而不是靠"不收尾"——isStreaming 卡在 true 是这次修复要根除的东西。
-  function handleStreamError(e: any, msg: any, filesToSend: any, requestMessage = msg) {
+  function handleStreamError(e: any, msg: any, filesToSend: any, requestMessage: string, clientRequestId?: string) {
     pendingReply = null;
     stopCatchUpWatcher();
     clearFetchRetryStatus();
@@ -2235,8 +2241,8 @@ function createStreamRuntime(state: any, options: any): any {
         queueDisconnectRecovery(sid, liveSeq);
         tuiClear();
       } else {
-        // 初始连接就失败，消息根本没送出去 → 保留手动重试按钮
-        addNetworkFailureMessage(msg, filesToSend, requestMessage);
+        // The POST may already have reached the Gateway if the response was lost.
+        addNetworkFailureMessage(msg, filesToSend, requestMessage, clientRequestId);
         setStatus("error");
         tuiClear();
       }

@@ -20,9 +20,14 @@ export function useVoice(api: VoiceAPI | undefined, scope: string, enabled: bool
     if (action === 'start') {
       if (session.current) return;
       const request = ++generation.current;
-      setState({ ...idle, state: 'connecting' });
+      setState({ ...idle, state: 'connecting', microphone: 'starting' });
+      let unconfirmedStop: string | undefined;
       const current = new VoiceSession(api, event => {
         if (session.current !== current) return;
+        if (event.type === 'desktop.microphone') {
+          const microphone = event.state as VoiceState['microphone'];
+          setState(value => ({ ...value, microphone }));
+        }
         if (event.type === 'desktop.input-level' && typeof event.level === 'number') {
           const inputLevel = event.level;
           setState(value => ({ ...value, inputLevel }));
@@ -40,21 +45,35 @@ export function useVoice(api: VoiceAPI | undefined, scope: string, enabled: bool
           if (['stopped', 'connecting', 'ready', 'error'].includes(String(event.state)))
             setState(value => ({ ...value, state: event.state as VoiceState['state'], inputLevel: 0, error: event.state === 'ready' ? '' : value.error }));
         }
-        if (event.type === 'error' || (event.type === 'desktop.voice' && event.state === 'error'))
+        if (event.type === 'error' || (event.type === 'desktop.voice' && event.state === 'error')) {
+          unconfirmedStop = (event.error as { code?: string } | undefined)?.code === 'stop_unconfirmed' && typeof event.streamId === 'string'
+            ? event.streamId : undefined;
           setState(value => ({ ...value, error: String(event.message || '语音连接异常，请重试。').slice(0, 6000) }));
+        }
+        if (event.type === 'text.stop.resolved' && unconfirmedStop && event.streamId === unconfirmedStop) {
+          unconfirmedStop = undefined;
+          setState(value => ({ ...value, error: '' }));
+        }
+        if (event.type === 'transcript.discard' && event.role === 'user') {
+          const id = event.turnId || event.itemId;
+          setState(value => {
+            const rows = value.userTranscripts || [];
+            const remaining = rows.filter(row => row.id !== id || !row.streaming);
+            if (remaining.length === rows.length) return value;
+            return { ...value, userTranscripts: remaining, userTranscript: remaining.at(-1)?.text || '' };
+          });
+        }
         if ((event.type === 'transcript.final' || event.type === 'transcript.delta') && event.role === 'user') {
           const content = String(event.content || '');
           setState(value => {
-            const userText = event.replace === true || event.type === 'transcript.final'
-              ? content
-              : `${value.userTranscript || ''}${content}`;
-            const id = String(event.itemId || event.turnId || `speech-${Date.now()}`);
+            const id = String(event.turnId || event.itemId || `speech-${Date.now()}`);
             const rows = [...(value.userTranscripts || [])];
             const index = rows.findIndex(row => row.id === id);
-            const row = { id, text: userText.slice(0, 6000), streaming: event.type !== 'transcript.final', at: index >= 0 ? rows[index].at : Date.now() };
+            const text = event.replace === true || event.type === 'transcript.final' ? content : (rows[index]?.text || '') + content;
+            const row = { id, text: text.slice(0, 6000), streaming: event.type !== 'transcript.final', at: index >= 0 ? rows[index].at : Date.now() };
             if (index >= 0) rows[index] = row; else rows.push(row);
             while (rows.length > 64) rows.shift();
-            return { ...value, userTranscript: userText.slice(0, 6000), userTranscripts: rows, transcript: '' };
+            return { ...value, userTranscript: rows[rows.length - 1].text, userTranscripts: rows, transcript: '' };
           });
         }
         if (event.task && typeof event.task === 'object') {

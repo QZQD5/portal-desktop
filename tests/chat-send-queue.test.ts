@@ -30,6 +30,7 @@ it('queues same-scene input, allows priority interruption and cancellation, then
     expect(sent).not.toHaveBeenCalled();
     expect(state.queued).toBe(3);
     expect(rows.size).toBe(3);
+    const requestIds = new Map([...rows.values()].map(row => [row.text, row.id]));
     const [first, priority, cancel] = state.items;
     await first.editQueued?.('edited first');
     expect(first.text).toBe('edited first');
@@ -39,7 +40,7 @@ it('queues same-scene input, allows priority interruption and cancellation, then
     await cancel.cancelQueued();
     expect(state.queued).toBe(2);
     await priority.interruptQueued();
-    expect(sent).toHaveBeenCalledWith('priority',[],expect.objectContaining({queuedMessage:priority,intelligentUI:true}));
+    expect(sent).toHaveBeenCalledWith('priority',[],expect.objectContaining({queuedMessage:priority,intelligentUI:true,clientRequestId:requestIds.get('priority')}));
     expect(priority.queued).toBe(false);
     expect(state.items).toEqual([first,priority]);
     expect(state.queued).toBe(1);
@@ -56,6 +57,7 @@ it('queues same-scene input, allows priority interruption and cancellation, then
     await vi.advanceTimersByTimeAsync(2100);
     expect(sent.mock.calls.map(call=>call[0])).toEqual(['priority','direct','edited first','other-scene']);
     expect(sent.mock.calls[2][1]).toEqual(files);
+    expect(sent.mock.calls[2][2].clientRequestId).toBe(requestIds.get('first'));
     expect(rows.size).toBe(0);
     expect(state.items.filter((item:any)=>item.queued)).toHaveLength(0);
   } finally {runtime.dispose(); read.mockRestore(); write.mockRestore(); vi.useRealTimers();}

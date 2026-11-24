@@ -146,7 +146,7 @@ function ChatView({
   const { viewport, narrow, nativeTouch } = useChatViewport(mobileWeb);
   const [editingQueued, setEditingQueued] = useState<Message | null>(null);
   const voice = state.voice || { state: 'stopped' as const, muted: false, error: '', transcript: '', task: '' };
-  const timelineItems = replyBubbles(sceneItems(withScheduling(voiceMessages(state.items.filter(item => item.kind !== "message" || !item.queued || !!item.attachmentViews?.length || !!item.attachmentUploads?.length), voice, state.discardedTaskIds), state.sceneTasks), state.historyScope, state.currentScene, state.showSbsMessages));
+  const timelineItems = replyBubbles(sceneItems(withScheduling(voiceMessages(state.items.filter(item => item.kind !== "message" || !item.queued || !!item.attachmentViews?.length || !!item.attachmentUploads?.length), voice), state.sceneTasks), state.historyScope, state.currentScene, state.showSbsMessages));
   const historyWindow=useHistoryWindow(state.historyLoading ? [] : timelineItems,JSON.stringify([state.historyScope,state.currentScene.sceneId,state.showSbsMessages]),before=>runtime.loadOlderHistory(before));
   const visibleItems=historyWindow.items;
   const progressRuns = quietProgressRuns(timelineItems);

@@ -53,6 +53,7 @@ export interface VoicePresentation {
 export interface VoiceState {
   state: 'stopped' | 'connecting' | 'ready' | 'error';
   muted: boolean;
+  microphone?: 'starting' | 'ready' | 'recovering' | 'unavailable';
   inputLevel?: number;
   error: string;
   transcript: string;
@@ -65,6 +66,7 @@ export function isVoiceState(value: unknown): value is VoiceState {
   if (!value || typeof value !== 'object') return false;
   const data = value as VoiceState;
   return ['stopped', 'connecting', 'ready', 'error'].includes(data.state) && typeof data.muted === 'boolean' &&
+    (data.microphone === undefined || ['starting', 'ready', 'recovering', 'unavailable'].includes(data.microphone)) &&
     (data.inputLevel === undefined || (Number.isFinite(data.inputLevel) && data.inputLevel >= 0 && data.inputLevel <= 1)) &&
     [data.error, data.transcript, data.task].every(text => typeof text === 'string' && text.length <= 6000) &&
     (data.userTranscript === undefined || (typeof data.userTranscript === 'string' && data.userTranscript.length <= 6000)) &&

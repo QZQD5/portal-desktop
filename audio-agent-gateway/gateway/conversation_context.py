@@ -42,13 +42,17 @@ def text_work(store, scene_id):
     if not chat or chat.get("routed") or chat.get("reply_scene", chat["scene"])["scene_id"] != scene_id:
         return None
     receipt = store.archive.state("request:" + chat.get("request_id", "")) or {}
+    if chat.get("discard_output"):
+        # A muted reply can still be executing. Old records have no stored stop receipt.
+        status = ("stopped" if chat.get("stopped") else "discarded" if chat.get("finished") and not pending(chat)
+                  else chat.get("voice_stop_status", "stop_unconfirmed"))
+    else:
+        status = ("unknown" if receipt.get("uncertain") else "sending" if receipt.get("status") == "sending" else
+                  "stopped" if chat.get("stopped") else "failed" if chat.get("failed") else
+                  "delegated" if pending(chat) else "completed" if chat.get("finished") else "running")
     return {
         "streamId": chat["stream_id"], "requestId": chat.get("request_id"),
-        "status": "unknown" if receipt.get("uncertain") else "sending" if receipt.get("status") == "sending" else
-                  "stopped" if chat.get("stopped") else
-                  "discarded" if chat.get("discard_output") and chat.get("finished") and not pending(chat) else
-                  "failed" if chat.get("failed") else
-                  "delegated" if pending(chat) else "completed" if chat.get("finished") else "running",
+        "status": status,
         "progress": chat.get("progress", ""),
         **({"outputDiscarded": True} if chat.get("discard_output") else {}),
         **({"callback": True} if chat.get("callback") else {}),

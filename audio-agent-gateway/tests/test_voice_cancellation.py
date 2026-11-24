@@ -208,8 +208,10 @@ async def test_voice_cancel_discards_text_stream_while_stop_is_unconfirmed(runni
         ack = await client.wait("transcript.final", lambda e: e.get("content") == "我这就帮你取消。")
         await client.wait("audio.done", lambda e: e.get("responseId") == ack["responseId"])
         await asyncio.wait_for(stopping.wait(), 2)
-        task = next(iter(gateway.tasks.tasks.values()))
-        assert not release_stop.is_set() and task["discard_output"]
+        # Keyboard input is a direct text stream; it does not create a delegated task.
+        assert not release_stop.is_set() and gateway.chat.current["discard_output"]
+        work = gateway.tools.current_tasks(gateway.active.id)["textWork"]
+        assert work["status"] == "cancelling"
         release_text.set()
         response = await asyncio.wait_for(posting, 2)
         assert "event: stream_discarded" in response.text
@@ -225,6 +227,70 @@ async def test_voice_cancel_discards_text_stream_while_stop_is_unconfirmed(runni
     finally:
         release_stop.set()
         release_text.set()
+        await asyncio.gather(posting, return_exceptions=True)
+        await client.ws.close()
+
+
+@pytest.mark.parametrize(("failure", "retry"), [("503", True), ("timeout", True), ("503", False)])
+async def test_unconfirmed_text_stop_remains_visible_until_retry_or_completion(running, monkeypatch, failure, retry):
+    gateway, provider, http, port = running
+    started, finish = asyncio.Event(), asyncio.Event()
+    send, attempts = gateway.chat.client.http.send, []
+
+    class Live(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield event("meta", {"stream_id": "original-stream"})
+            started.set()
+            await finish.wait()
+            yield event("message_stop", {})
+
+    async def respond(request, **kwargs):
+        if request.url.path.endswith("/api/chat/stream"):
+            headers = {"content-type": "text/event-stream"}
+            if not started.is_set():
+                return httpx.Response(200, headers=headers, stream=Live())
+            return httpx.Response(200, headers=headers, content=event("message_stop", {}))
+        if request.url.path.endswith("/api/stop"):
+            attempts.append(json.loads(request.content)["stream_id"])
+            if len(attempts) == 1:
+                if failure == "timeout":
+                    raise httpx.ReadTimeout("timeout", request=request)
+                return httpx.Response(503)
+            return httpx.Response(204)
+        return await send(request, **kwargs)
+
+    monkeypatch.setattr(gateway.chat.client.http, "send", respond)
+    model_tool(monkeypatch, provider, {"取消。": ("cancel_agent_task", {}),
+                                      "进度？": ("get_agent_task_status", {"list_all": True})})
+    client = await open_client(port)
+    body = {"message": "生成报表", "scene_id": gateway.settings.being_scene["scene_id"]}
+    posting = asyncio.create_task(http.post("/api/heart/chat/stream", json=body))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        stream_id = gateway.chat.current["stream_id"]
+        await client.speak(provider, "取消。")
+        notice = await client.wait("error", lambda e: e.get("error", {}).get("code") == "stop_unconfirmed")
+        assert notice["streamId"] == stream_id and "再次取消" in notice["message"]
+        await client.speak(provider, "进度？")
+        status = await client.wait("tool.call", lambda e: e["name"] == "get_agent_task_status" and e["status"] == "completed")
+        result = json.loads(status["result"])
+        assert result["active_count"] == 1 and result["textWork"]["status"] == "stop_unconfirmed"
+        blocked = await http.post("/api/heart/chat/stream", json={**body, "message": "下一条"})
+        assert blocked.status_code == 409 and "再次取消" in blocked.json()["error"]
+        if retry:
+            await client.speak(provider, "取消。")
+        else:
+            finish.set()
+        response = await asyncio.wait_for(posting, 4)
+        resolution = await client.wait("text.stop.resolved", lambda e: e["streamId"] == stream_id)
+        assert resolution["status"] == ("stopped" if retry else "ended")
+        assert attempts == ["original-stream"] * (2 if retry else 1)
+        assert ("event: stream_stopped" if retry else "event: stream_discarded") in response.text
+        assert bool(gateway.chat.current.get("stopped")) is retry
+        assert gateway.tools.current_tasks(gateway.active.id)["textWork"] is None
+        assert (await http.post("/api/heart/chat/stream", json={**body, "message": "下一条"})).is_success
+    finally:
+        finish.set()
         await asyncio.gather(posting, return_exceptions=True)
         await client.ws.close()
 

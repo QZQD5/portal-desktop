@@ -25,6 +25,7 @@ export class VoiceSession {
   private generation = 0;
   private ready = false;
   private muted = false;
+  private microphoneEpoch = 0;
   private inputLevel = new MicrophoneInputLevel();
   private lastInputLevel = 0;
   private presentation: VoicePresentationStream;
@@ -49,10 +50,11 @@ export class VoiceSession {
       this.ready = true;
       this.capture = createMicrophoneCaptureLifecycle({ mediaDevices: navigator.mediaDevices,
         acquire: () => this.acquire(generation),
-        onState: state => { if (state.state !== 'ready') this.resetInputLevel(); },
-        onFatalError: error => {
-          this.event({ type: 'error', message: error.message || '无法使用麦克风。' }); void this.stop();
+        onState: ({ state }) => {
+          if (state !== 'ready') this.resetInputLevel();
+          this.event({ type: 'desktop.microphone', state });
         },
+        onFatalError: error => this.failMicrophone(error.message || '无法使用麦克风。'),
       });
       this.capture.start();
       this.follow = createPlaybackOutputFollow({ mediaDevices: navigator.mediaDevices, getContext: () => this.context });
@@ -63,24 +65,48 @@ export class VoiceSession {
     const context = this.context!;
     const media = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     const resampler = createStreamingResampler();
-    let buffer = new Float32Array(0), pending = false, closed = false;
+    // Bound microphone backlog to one second. Keep the normal 40 ms packet cadence.
+    const buffer = new Float32Array(16000);
+    let size = 0, epoch = this.microphoneEpoch, sending = false, closed = false;
+    const drain = async () => {
+      sending = true;
+      while (!closed && epoch === this.microphoneEpoch && size >= 640) {
+        // A delayed IPC call can catch up without feeding a whole second to VAD in one event.
+        const length = Math.min(size - size % 640, 4 * 640), batch = epoch;
+        const audio = pcmBase64(buffer.subarray(0, length));
+        const sent = await this.api.send({ type: 'input_audio_buffer.append', audio }).catch(() => null);
+        if (closed || batch !== this.microphoneEpoch) continue;
+        if (sent === null) {
+          this.failMicrophone('麦克风音频发送失败，请重新开始语音。');
+          break;
+        }
+        if (sent) {
+          buffer.copyWithin(0, length, size);
+          size -= length;
+        } else {
+          // The main process explicitly declined this packet. Keep it ahead of newer PCM.
+          await new Promise(resolve => setTimeout(resolve, 40));
+        }
+      }
+      sending = false;
+    };
     const source = context.createMediaStreamSource(media);
     try {
       const workletURL = new URL('./microphone-audio-worklet-processor.js', import.meta.url).href;
       const processor = await createMicrophoneAudioWorkletNode({ context, moduleUrl: workletURL, onSamples: samples => {
-        if (closed || !this.ready || this.muted || generation !== this.generation) { buffer = new Float32Array(0); resampler.reset(); return; }
+        if (closed || !this.ready || this.muted || generation !== this.generation) return;
+        if (epoch !== this.microphoneEpoch) { epoch = this.microphoneEpoch; size = 0; resampler.reset(); }
         this.inputLevel.add(samples);
         const chunk = resampler.process(samples, context.sampleRate, 16000);
-        const joined = new Float32Array(buffer.length + chunk.length); joined.set(buffer); joined.set(chunk, buffer.length); buffer = joined;
-        if (buffer.length < 640) return;
-        const audio = pcmBase64(buffer); buffer = new Float32Array(0);
-        // Live capture must not accumulate stale audio while IPC is congested.
-        if (pending) return;
-        pending = true;
-        void this.api.send({ type: 'input_audio_buffer.append', audio }).catch(() => false).finally(() => { pending = false; });
+        if (size + chunk.length > buffer.length) {
+          this.failMicrophone('麦克风音频发送积压，请重新开始语音。');
+          return;
+        }
+        buffer.set(chunk, size); size += chunk.length;
+        if (!sending && size >= 640) void drain();
       } });
       source.connect(processor.node); processor.node.connect(context.destination);
-      return { media, track: media.getAudioTracks()[0], close: () => { closed = true; this.resetInputLevel(); media.getTracks().forEach(track => track.stop()); source.disconnect(); processor.close(); } };
+      return { media, track: media.getAudioTracks()[0], close: () => { closed = true; size = 0; this.resetInputLevel(); media.getTracks().forEach(track => track.stop()); source.disconnect(); processor.close(); } };
     } catch (error) { media.getTracks().forEach(track => track.stop()); source.disconnect(); throw error; }
   }
   private publishInputLevel(level: number) {
@@ -183,9 +209,19 @@ export class VoiceSession {
     while (this.suppressed.size > 256) this.suppressed.delete(this.suppressed.values().next().value!);
     this.presentation.tick(this.context?.currentTime || 0);
   }
-  mute(value: boolean) { this.muted = value; this.resetInputLevel(); void this.api.send({ type: value ? 'input.mute' : 'input.unmute' }).catch(() => {}); }
+  mute(value: boolean) {
+    this.muted = value;
+    if (value) this.microphoneEpoch++;
+    this.resetInputLevel();
+    void this.api.send({ type: value ? 'input.mute' : 'input.unmute' }).catch(() => {});
+  }
   interrupt() { this.clear(); void this.api.send({ type: 'response.cancel' }).catch(() => {}); }
+  private failMicrophone(message: string) {
+    void this.stop().catch(() => {});
+    this.event({ type: 'desktop.voice', state: 'error', message });
+  }
   async stop() {
+    if (!this.context) return;
     clearInterval(this.presentationTimer);
     this.resetInputLevel();
     this.generation++; this.ready = false; this.capture?.stop(); this.follow?.stop();

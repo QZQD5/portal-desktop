@@ -57,6 +57,7 @@ export async function followDefaultAudioOutput(context) {
   if (typeof context.setSinkId !== 'function') return false
 
   const previous = contextSinkId(context)
+  const wasRunning = context.state === 'running'
   try {
     try {
       await applySinkId(context, { type: 'none' })
@@ -72,6 +73,9 @@ export async function followDefaultAudioOutput(context) {
       // Best-effort restore; the caller keeps the existing context.
     }
     return false
+  } finally {
+    // Chromium can suspend the shared capture/playback clock while switching outputs.
+    if (wasRunning && context.state === 'suspended') await context.resume()
   }
 }
 

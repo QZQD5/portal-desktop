@@ -206,8 +206,8 @@ class Tools:
         tasks = [task_summary(task) for task in self.scene_tasks(session_id, scene_id)
                  if task["status"] not in TERMINAL and not task.get("discard_output")]
         work = text_work(self.store, scene_id)
-        if work and (work.get("callback") or work.get("outputDiscarded")
-                     or work["status"] not in {"sending", "running", "delegated", "unknown"}):
+        if work and (work.get("callback") or work["status"] not in
+                     {"sending", "running", "delegated", "unknown", "cancelling", "stop_unconfirmed"}):
             work = None
         if work:
             work.pop("progress", None)
@@ -373,9 +373,13 @@ class Tools:
             current = self.current_tasks(session.id, scene_id)
             items = current["tasks"]
             if args.get("list_all") or not items:
-                result = {**current, "tasks": items[:20], "active_count": len(items),
+                work = current["textWork"]
+                result = {**current, "tasks": items[:20], "active_count": len(items) + int(work is not None),
                           "queued_count": sum(task["status"] == "queued" for task in items)}
-                if not items and not current["textWork"]:
+                if work and work["status"] in {"cancelling", "stop_unconfirmed"}:
+                    result["user_message"] = ("文字请求正在取消。" if work["status"] == "cancelling"
+                                              else "文字请求尚未确认停止，可以再次取消。")
+                elif not items and not work:
                     result.update(status="empty", user_message="现在没有正在处理或排队的任务。")
                 return result
             if request_context is not None and turn_id != session.turn:

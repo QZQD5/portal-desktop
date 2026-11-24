@@ -2,17 +2,15 @@ import type { ChatItem, Message, Run } from './chat';
 import type { VoiceState } from '../../../shared/voice';
 
 /** Keep the durable history intact while projecting the live speaker's text onto its bubble. */
-export function voiceMessages(items: ChatItem[], voice: VoiceState | null, discardedTaskIds?: ReadonlySet<string>): ChatItem[] {
+export function voiceMessages(items: ChatItem[], voice: VoiceState | null): ChatItem[] {
   const presentation = voice?.presentation;
-  const discarded = new Set(discardedTaskIds);
+  const discarded = new Set<string>();
   for (const task of presentation?.tasks || [])
     if (task.outputDiscarded && task.id) discarded.add(task.id);
-  // Only hide Being bubbles that belong to a discarded voice/agent task.
-  // Never treat a missing taskId/voiceKey as "" — that would wipe ordinary text replies.
+  // Local history identifies durable task results with an agent:<task id> voice key.
   if (discarded.size) items = items.filter(item => {
     if (item.kind !== 'message' || item.role !== 'being') return true;
-    const id = item.taskId || item.voiceKey?.replace(/^agent:/, '');
-    return !id || !discarded.has(id);
+    return !item.voiceKey?.startsWith('agent:') || !discarded.has(item.voiceKey.slice(6));
   });
   if (!presentation) return items;
   items = voiceWorkRuns(items, presentation, voice!.state === 'ready');

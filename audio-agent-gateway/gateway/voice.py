@@ -140,6 +140,7 @@ class VoiceSession:
         self.audio_activity = AudioActivity()
         self.local_barge_in = None
         self.held_barge = None
+        self.recent_playback_speech = None
         self.speech_status_job = None
         self.native_pending_since = 0
         self.turn = uid("turn")
@@ -519,6 +520,7 @@ class VoiceSession:
                 self.speaking_user = False
                 self.local_barge_in = None
                 self.held_barge = None
+                self.recent_playback_speech = None
                 self.audio_activity.reset()
                 self.native_pending_since = 0
                 self.playing.clear()
@@ -545,6 +547,7 @@ class VoiceSession:
         self.audio_activity.reset()
         self.local_barge_in = None
         self.held_barge = None
+        self.recent_playback_speech = None
         if self.ready.is_set():
             muted = not self.input_enabled or self.sleeping or self.gateway.suspended
             await self.upstream_send(
@@ -624,6 +627,7 @@ class VoiceSession:
     async def interrupt(self, *, voice=False, reason="user_interruption", new_turn=True, turn_id=None):
         self.local_barge_in = None
         self.held_barge = None
+        self.recent_playback_speech = None
         request = self.request_for_turn(self.turn)
         self.sleep_activity = time.monotonic()
         responses, replies = list(self.responses.items()), list(self.replies.values())
@@ -1240,6 +1244,8 @@ class VoiceSession:
                     await self.transcript("user", text, final=True, turn_id=record["turn"], source="voice-user-delayed")
                     await self.sync_context()
             return
+        if record.get("late_onset") and (record["complete"] or record["generation"] != self.generation):
+            return
         if kind not in {
             "conversation.item.input_audio_transcription.delta",
             "conversation.item.input_audio_transcription.text",
@@ -1249,6 +1255,17 @@ class VoiceSession:
         if kind == "input_audio_buffer.speech_started":
             if event.get("native_asr") and record.get("started"):
                 return
+            if record.get("late_onset") and not event.get("commit_barge"):
+                return
+            recent = self.recent_playback_speech
+            self.recent_playback_speech = None
+            if (recent and item_id and event.get("native_asr")
+                    and not event.get("commit_barge") and not self.audio_activity.speaking):
+                owner, onset = recent
+                if (owner == self.active or owner in self.playing) and time.monotonic() - onset < TRANSCRIPTION_WAIT_SECONDS:
+                    # This reply outlasted a short local utterance. Wait for its transcript.
+                    record["late_onset"] = True
+                    return
             if (
                 (self.playing or self.active)
                 and self.audio_activity.speaking
@@ -1314,6 +1331,8 @@ class VoiceSession:
                          self.id, item_id, record["turn"], record["complete"], record["invalid"])
             return
         if kind == "input_audio_buffer.speech_stopped":
+            if record.get("late_onset"):
+                return
             held = self.held_barge
             if held and held.get("item_id") == item_id and not record.get("started"):
                 held["stopped"] = True
@@ -1349,7 +1368,12 @@ class VoiceSession:
                 if record["invalid"]:
                     return
             text = (str(event.get("text") or "") + str(event.get("stash") or "")).strip()
-            if _meaningful_speech(text) and self.held_barge and self.held_barge.get("item_id") == item_id and not record.get("started"):
+            late = record.get("late_onset")
+            if late and not _meaningful_speech(text):
+                return
+            held = self.held_barge and self.held_barge.get("item_id") == item_id
+            if (late or held) and not record.get("started") and _meaningful_speech(text):
+                record.pop("late_onset", None)
                 await self._provider_input({
                     "type": "input_audio_buffer.speech_started",
                     "item_id": item_id,
@@ -1377,11 +1401,15 @@ class VoiceSession:
             "conversation.item.ambient_audio_transcription.completed",
         }:
             text = str(event.get("transcript") or "").strip()
-            if self.held_barge and self.held_barge.get("item_id") == item_id and not record.get("started"):
-                if not _meaningful_speech(text):
-                    self.held_barge = None
+            late = record.get("late_onset")
+            held = self.held_barge and self.held_barge.get("item_id") == item_id
+            if (late or held) and not record.get("started"):
+                if not _meaningful_speech(text) or (late and kind.endswith(".failed")):
+                    if held:
+                        self.held_barge = None
                     record.update(invalid=True, complete=True)
                     return
+                record.pop("late_onset", None)
                 await self._provider_input({
                     "type": "input_audio_buffer.speech_started",
                     "item_id": item_id,
@@ -1415,7 +1443,7 @@ class VoiceSession:
                     targets = self.tools.cancel_targets(self.id)
                 text_work = context["textWork"]
                 chat = self.gateway.chat
-                if (text_work and text_work["status"] in {"sending", "running", "delegated"}
+                if (text_work and text_work["status"] in {"sending", "running", "delegated", "cancelling", "stop_unconfirmed"}
                         and not (chat.current or {}).get("callback")):
                     # A newer typed request can splice into the same stream ID.
                     targets[text_work["streamId"]] = ("stream_id", chat.request_order)
@@ -2494,12 +2522,15 @@ class VoiceSession:
             raise ValueError("Audio must contain whole PCM16 samples")
         speech_started = self.audio_activity.append(decoded)
         output_busy = bool(self.playing or self.active)
+        if speech_started and output_busy:
+            self.recent_playback_speech = (self.active or next(iter(self.playing)), time.monotonic())
         if speech_started and not output_busy:
             await self.stop_playback_on_speech()
             await self.sync_speech_context(self.local_barge_in)
         elif output_busy and self.audio_activity.playback_barge() and not (
             self.local_barge_in and self.local_barge_in.get("playback_cut")
         ):
+            self.recent_playback_speech = None
             await self.stop_playback_on_speech()
             if self.local_barge_in is not None:
                 self.local_barge_in["playback_cut"] = True

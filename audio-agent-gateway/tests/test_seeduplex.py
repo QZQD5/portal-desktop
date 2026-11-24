@@ -430,6 +430,59 @@ async def test_local_speech_stops_output_before_cloud_asr_without_cancelling_inp
     assert not native.responses["fresh-reply"]["suppressed"]
 
 
+@pytest.fixture
+async def short_interjection_during_playback(native):
+    await native.provider_event({"type": "response.created", "response": {"id": "old"}})
+    await native.provider_event({"type": "response.audio.delta", "response_id": "old", "delta": "AAAA"})
+    await native.playback_started("old")
+    # Use the shipped Silero model, then let it observe silence before the cloud onset.
+    pcm = (Path(__file__).parent / "fixtures/speech-stop.pcm").read_bytes() + bytes(18 * 1024)
+    heard_speech = False
+    for offset in range(0, len(pcm), 1280):
+        await native.append_audio(base64.b64encode(pcm[offset:offset + 1280]).decode())
+        heard_speech |= native.audio_activity.speaking
+    assert heard_speech and not native.audio_activity.speaking and "old" in native.playing
+    return native
+
+
+@pytest.mark.parametrize("partial,final", [
+    (None, None), ("等一下", "等一下。"), (None, "等一下。"), ("你继续", "你继续。"),
+], ids=["onset-only", "stop-partial", "stop-final", "ordinary-request"])
+async def test_late_native_onset_waits_for_transcript(short_interjection_during_playback, partial, final):
+    session = short_interjection_during_playback
+    generation = session.generation
+    asr = "conversation.item.input_audio_transcription."
+    packets = [({"type": asr + "started"}, False)]
+    if partial:
+        packets.append(({"type": asr + "delta", "delta": partial}, True))
+    if final:
+        packets.append(({"type": asr + "completed", "text": final}, True))
+
+    for packet, interrupted in packets:
+        for event in session.protocol.normalize({**packet, "item_id": "late"}):
+            await session.provider_event(event)
+        clears = [call for call in session.emit.call_args_list if call.args[0]["type"] == "playback.clear"]
+        assert len(clears) == int(interrupted)
+        assert ("old" in session.playing) == (not interrupted)
+        assert session.generation == generation + int(interrupted)
+    if final:
+        assert session.input_records["late"]["confirmed"]
+        assert any(m["role"] == "user" and m["content"] == final for m in session.store.history(session.id))
+
+
+async def test_short_interjection_does_not_defer_onset_during_next_reply(short_interjection_during_playback):
+    session = short_interjection_during_playback
+    await session.provider_event({"type": "response.done", "response_id": "old"})
+    await session.playback_ended("old")
+    await session.provider_event({"type": "response.created", "response": {"id": "new"}})
+    await session.provider_event({"type": "response.audio.delta", "response_id": "new", "delta": "AAAA"})
+    await session.playback_started("new")
+    for event in session.protocol.normalize({"type": "conversation.item.input_audio_transcription.started", "item_id": "next"}):
+        await session.provider_event(event)
+    assert session.input_records["next"]["started"] and "new" not in session.playing
+    assert any(call.args[0]["type"] == "playback.clear" for call in session.emit.call_args_list)
+
+
 @pytest.mark.parametrize("playing", [False, True])
 @pytest.mark.parametrize("queued", [False, True])
 async def test_local_vad_delivers_waiting_results_as_text_without_replaying_or_cancelling_work(native, playing, queued):
