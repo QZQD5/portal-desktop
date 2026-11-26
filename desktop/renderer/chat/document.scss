@@ -13,6 +13,7 @@
 @use './styles/strict-fidelity';
 @use './styles/message-actions';
 @use './styles/attachment-menu';
+@use '../voice/control';
 
 :root {
   --chat-task-check: url('./assets/task-check.svg');

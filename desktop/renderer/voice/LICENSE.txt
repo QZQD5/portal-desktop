@@ -1,3 +1,14 @@
+Silero VAD v6.2.3, MIT License, Copyright (c) 2020-present Silero Team.
+silero-v6.2.3.onnx is the 16 kHz, opset 15 model from snakers4/silero-vad,
+commit 5cd7945676eb32225748052e2e6a0580e4686a08.
+SHA-256: 7ed98ddbad84ccac4cd0aeb3099049280713df825c610a8ed34543318f1b2c49
+Source: https://github.com/snakers4/silero-vad/tree/5cd7945676eb32225748052e2e6a0580e4686a08/src/silero_vad/data
+
+ONNX Runtime Web 1.22.0 uses the MIT License, Copyright (c) Microsoft Corporation.
+The ONNX Runtime license and upstream ThirdPartyNotices.txt included with this
+notice are from Microsoft's ONNX Runtime 1.22.0 distribution on PyPI.
+Source: https://github.com/microsoft/onnxruntime
+
 Audio Lines icon: https://lucide.dev/icons/audio-lines
 Reused from audio-agent-gateway WebUI commit 632bc5f9eadd1ed9b117d08259eab0b780b1dc76.
 

@@ -38,8 +38,6 @@ export class VoicePresentationStream {
     // merely because a task carries a stale or unmarked scene id.
     if (!this.sceneId && typeof event.scene_id === 'string' && event.scene_id) this.sceneId = event.scene_id;
     const id = String(event.responseId || '');
-    if (event.origin === 'progress' && (event.type === 'response.started' ||
-        ((event.type === 'transcript.delta' || event.type === 'transcript.final') && event.role === 'assistant'))) return;
     if (event.type === 'response.started' && event.origin !== 'announcement' && event.origin !== 'text') {
       const waiting = this.messages.get(this.current || '');
       this.responses.set(id, 'voice:' + id);
@@ -149,8 +147,8 @@ export class VoicePresentationStream {
         continue;
       }
       // Text tasks already have a bubble owned by the chat stream.
-      if (task.notificationStatus === 'pending' && !task.chatStreamId) this.message(key);
-      if (task.notificationStatus === 'delivered' || task.status === 'cancelled') {
+      if ((task.notificationStatus === 'queued' || task.notificationStatus === 'pending') && !task.chatStreamId) this.message(key);
+      if (task.notificationStatus === 'delivered' || task.notificationStatus === 'interrupted' || task.status === 'cancelled') {
         const row = this.messages.get(key);
         if (row) this.complete(row);
       }

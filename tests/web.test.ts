@@ -146,6 +146,11 @@ it("uses only deployment-configured Loom targets and rejects cross-origin writes
     (await fetch(proxy + "/loom-api/api/status?token=loom-token")).status,
   ).toBe(200);
   expect(received).toBe("/willow/api/status?token=loom-token");
+  const voiceTask = await fetch(proxy + "/loom-api/api/chat/stream", {
+    method: "POST", headers: { Authorization: "Bearer voice-task-fixture" }, body: "{}",
+  });
+  expect(voiceTask.status).toBe(200);
+  expect(received).toBe("/willow/api/chat/stream?token=voice-task-fixture");
   expect(
     (
       await fetch(proxy + "/loom-api/api/chat/stream", {

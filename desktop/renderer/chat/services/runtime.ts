@@ -1,5 +1,5 @@
 import { CHAT_SCENE_ACTIVITY_LABELS, type ChatSceneActivity } from '../../../shared/types';
-import { ChatEventDecoder } from './sse';
+import { ChatEventDecoder } from '../../../shared/chat-sse';
 import { withComposerCommandContext, usesIntelligentUICommand } from './composer-command-context';
 import { newToolActivity, completeToolActivity } from '../models/tool-activity';
 import { stripLocalFileContext, stripClientMessageContext } from './local-file-context';
@@ -8,7 +8,8 @@ import { MAX_ATTACHMENT_BYTES, LEGACY_WEB_ATTACHMENT_BYTES } from '../../../shar
 import { messageReferences } from './attachment-messages';
 import { validateIntelligentUIContext } from "../../shared/intelligent-ui/context";
 import { createSceneRuntime } from "./scene-runtime";
-import { HistoryCache, normalizeHistoryRows } from "./history-cache";
+import { normalizeHistoryRows } from "./history-cache";
+import { createHistory } from './gateway-history';
 import { chatHistoryLimit } from '../../../shared/chat-history';
 import { inCurrentScene, messageScene, sceneItems, sceneTransitionNotice, stripSceneTransition, type MessageScene } from "../models/scenes";
 import type { ChatRuntime, ChatState, Message, RuntimeOptions } from "../models/chat";
@@ -413,6 +414,7 @@ function createStreamRuntime(state: any, options: any): any {
   let lastMessageTime: any = null;
   let currentAbortController: any = null;
   let currentStreamId: any = null;
+  let typedStream: { stream_id: string; scene_id: string } | undefined;
   let lastStreamId: any = null; // 断线恢复需要它——currentStreamId 会在收尾时被清掉
   // F1: 外部（非 watchdog）发起的 cutover 会 abort 正在跑的 live reader。
   // reader 的 catch 靠这个槽把 AbortError 认成"已经交接给 replay 通道"，
@@ -1612,7 +1614,7 @@ function createStreamRuntime(state: any, options: any): any {
   // 也是 watchdog probe 热切换到 replay 通道的落点。
   // 返回 { outcome: 'done' | 'switch_to_replay' | 'aborted' | 'server_error', streamId, localSeq }
   // 异常（AbortError / TypeError / 其它）向上抛给调用方统一处理。
-  async function consumeChatStream(res: any) {
+  async function consumeChatStream(res: any, typedScene?: string) {
     routedStreaming = false;
     let streamTimeoutId: any = null;
     let watchdogAborted = false;
@@ -1756,6 +1758,7 @@ function createStreamRuntime(state: any, options: any): any {
               if (data.stream_id) {
                 currentStreamId = data.stream_id;
                 lastStreamId = data.stream_id;
+                if (typedScene && typeof data.stream_id === "string") typedStream = { stream_id: data.stream_id, scene_id: typedScene };
                 syncHistoryCursor(); // 用户 moment 此时已落盘，推进游标避免对账时重复渲染
               }
             }
@@ -2187,7 +2190,7 @@ function createStreamRuntime(state: any, options: any): any {
   async function driveChatStream(res: any, msg: any, filesToSend: any, requestMessage = msg, attachmentAccepted = false, requestBubble?: Message, clientRequestId?: string) {
     let handedOff = false;
     try {
-      const result = await consumeChatStream(res);
+      const result = await consumeChatStream(res, requestBubble?.sceneId);
       if (result.outcome === "done" && !result.handled && pendingReply) {
         // Reasoning/tool events are not a final reply. Every unresolved EOF
         // needs a bounded wait, retaining any newer splice request's baseline.
@@ -2630,7 +2633,7 @@ function createStreamRuntime(state: any, options: any): any {
   const cacheEndpoint = location.protocol === "beings:"
     ? params.get("history_scope") || ""
     : params.get("history_scope") || API_URL;
-  const historyCache = new HistoryCache(cacheEndpoint);
+  const historyCache = createHistory(cacheEndpoint);
   let historyCacheSeeded = false;
   let historyCachePending: any[] = [];
   const recentHistory = new Map<number, any>();
@@ -2799,7 +2802,7 @@ function createStreamRuntime(state: any, options: any): any {
     // live fragment can be its history echo; never steal an older reply's row.
     const localIndex = state.items.indexOf(message);
     const candidates = state.items.map((item: any, index: any) => ({ item, index })).filter(({ item, index }: any) =>
-      index > localIndex && item !== message && item.kind === "message" && item.historySeq && !item.persistedStreamId &&
+      index > localIndex && item !== message && item.kind === "message" && item.historySeq && !item.persistedStreamId && !item.voiceKey &&
       item.role === role && texts.includes(normalizeEcho(item.text, role)));
     const exact = [...candidates].reverse().find(({ item }: any) => echoScenesMatch(item, message || scene));
     if (exact) return exact.item;
@@ -2819,7 +2822,7 @@ function createStreamRuntime(state: any, options: any): any {
     const t = normalizeEcho(text, role);
     if (!t) return;
     const texts = [t, ...aliases.map(alias => normalizeEcho(alias, role)).filter(Boolean)];
-    const message = localMessage || [...state.items].reverse().find(item => item.kind === "message" && item.role === role && item.sceneId === scene.sceneId && normalizeEcho(item.text, role) === t);
+    const message = localMessage || [...state.items].reverse().find(item => item.kind === "message" && !item.voiceKey && item.role === role && item.sceneId === scene.sceneId && normalizeEcho(item.text, role) === t);
     // History can win the race against message_stop. In that order the normal
     // history -> local echo matcher has not been registered yet, so reconcile
     // the already-rendered persisted row back into the live bubble here.
@@ -2840,6 +2843,8 @@ function createStreamRuntime(state: any, options: any): any {
   function applyHistoryIdentity(message: any, history: any) {
     if (!message || !history) return;
     if (history.historySeq) message.historySeq = history.historySeq;
+    if (history.voiceKey) message.voiceKey = history.voiceKey;
+    if (history.voicePending !== undefined) message.voicePending = history.voicePending;
     if (history.persistedFrom) {
       message.persistedFrom = history.persistedFrom;
       message.interim = history.persistedFrom !== 'final';
@@ -2873,6 +2878,7 @@ function createStreamRuntime(state: any, options: any): any {
     }
   }
   function consumeLocalEcho(role: any, text: any, scene: any, history: any) {
+    if (history.voiceKey) return false;
     if (role === 'user') {
       const body = visibleMessageText(role, text || '');
       const ids = messageReferences(body);
@@ -2924,6 +2930,8 @@ function createStreamRuntime(state: any, options: any): any {
       interim: message.from === "partial" || message.from === "act_talk",
       persistedFrom: ["final", "partial", "act_talk"].includes(message.from) ? message.from : undefined,
       historySeq: Number(message.seq) || undefined,
+      voiceKey: message.voiceKey,
+      voicePending: message.voicePending,
       timestamp: formatHistoryTime(message.at),
       createdAt: Number.isFinite(time) ? time : undefined,
     };
@@ -2952,7 +2960,9 @@ function createStreamRuntime(state: any, options: any): any {
     const ids = [scene.sceneId, ...(!scene.strict && scene.legacySceneId ? [scene.legacySceneId] : [])];
     const cached = (await Promise.all(ids.map(id => historyCache.readScene(id,60)))).flat().sort((a, b) => a.seq - b.seq);
     if (disposed) return;
-    insertCachedHistory(cached);
+    // Desktop's local store also owns newly completed replies. The after= read
+    // below must receive those as live results so a queued turn can settle.
+    insertCachedHistory(location.protocol === 'beings:' ? cached.filter(row => row.seq <= lastHistorySeq) : cached);
   }
 
   function insertCachedHistory(cached: any[]) {
@@ -3957,6 +3967,9 @@ function createStreamRuntime(state: any, options: any): any {
       return null;
     },
     hasStream: (id: any) => isStreaming && currentStreamId === id,
+    activeTypedWork: () => !disposed && isStreaming && !chatRequestsInFlight && typedStream &&
+      typedStream.stream_id === currentStreamId && typedStream.scene_id === state.currentScene.sceneId
+      ? { ...typedStream, order: chatRequestRevision, status: "running" } : undefined,
     recoverConnection: onReconnected,
     syncConnection: (next: any) => { connState = next; applyDotClass(); },
     acceptReplay: replayStream,

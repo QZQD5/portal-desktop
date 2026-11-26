@@ -2,7 +2,7 @@ import type { ChatRuntime, ChatState, ChatPanel } from "../models/chat";
 import type { HistoryScope } from "../models/scenes";
 import type { ChatEditCommand } from "../../../shared/types";
 import { validChatHistoryLimit } from '../../../shared/chat-history';
-import { HistoryCache } from './history-cache';
+import { createHistory } from './gateway-history';
 import { localActivityHistory } from './activity-history';
 import { applyPluginAppearance } from '../../shared/plugin-appearance';
 import { isVoiceState } from '../../../shared/voice';
@@ -13,7 +13,7 @@ export function createChatBridge(state: ChatState) {
   const revision = new URLSearchParams(location.search).get("revision");
   const embedded = parent !== window;
   const historyEndpoint = new URLSearchParams(location.search).get('history_scope') || location.origin;
-  let activityCache: HistoryCache | undefined;
+  let activityCache: ReturnType<typeof createHistory> | undefined;
   // The isolated frame can have either the packaged shell or the Vite shell as its parent.
   // Only bounded, non-secret UI observations cross this channel.
   const targetOrigin = location.protocol === "beings:" ? "*" : location.origin;
@@ -149,7 +149,7 @@ export function createChatBridge(state: ChatState) {
       switch (data.type) {
         case 'beings:local-history-request':
           if (data.revision !== revision || data.endpoint !== historyEndpoint || typeof data.id !== 'string' || data.id.length > 64) return;
-          activityCache ||= new HistoryCache(historyEndpoint);
+          activityCache ||= createHistory(historyEndpoint);
           void localActivityHistory(activityCache, state).then(
             rows => { if (!disposed) send({ type: 'beings:local-history-result', id: data.id, endpoint: historyEndpoint, rows, ok: true }); },
             () => { if (!disposed) send({ type: 'beings:local-history-result', id: data.id, endpoint: historyEndpoint, ok: false }); },

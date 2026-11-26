@@ -20,12 +20,15 @@ export class GatewayHistory {
       const migration = (async () => {
         if (typeof indexedDB === 'undefined') return;
         if (typeof indexedDB.databases === 'function') {
-          const name = historyCacheDatabaseName(this.endpoint);
+          const name = historyCacheDatabaseName(this.endpoint, true);
           if (!(await indexedDB.databases()).some(database => database.name === name)) return;
         }
-        const status = await this.query('/import', { method: 'POST', body: JSON.stringify({ messages: [] }) });
+        const upload = (messages: HistoryMessage[], complete = false) => this.query('/import', {
+          method: 'POST', body: JSON.stringify({ source:'heart-indexeddb', messages, complete }),
+        });
+        const status = await upload([]);
         if (status.complete === true) return;
-        const legacy = new HistoryCache(this.endpoint);
+        const legacy = new HistoryCache(this.endpoint, true);
         try {
           const saved = await legacy.read();
           if (!saved) throw new Error('旧本地历史读取失败，原数据已保留。');
@@ -34,12 +37,12 @@ export class GatewayHistory {
           for (const row of saved.messages) {
             const bytes = new TextEncoder().encode(JSON.stringify(row)).length;
             if (batch.length && (batch.length >= 200 || size + bytes > 700_000)) {
-              await this.query('/import', { method: 'POST', body: JSON.stringify({ messages: batch }) });
+              await upload(batch);
               batch = []; size = 0;
             }
             batch.push(row); size += bytes;
           }
-          await this.query('/import', { method: 'POST', body: JSON.stringify({ messages: batch, complete: true }) });
+          await upload(batch, true);
         } finally { legacy.close(); }
       })().catch(error => { migrations.delete(this.endpoint); throw error; });
       migrations.set(this.endpoint, migration);
@@ -110,6 +113,7 @@ export class GatewayHistory {
 
   context(sceneId: string, limit = 50) { return this.readScene(sceneId, Math.min(50, limit)); }
   async scenes(): Promise<SceneSummary[]> { await this.migrate(); return (await this.query('/scenes')).scenes; }
+  async merge(messages: HistoryMessage[]) { return messages; }
   async write(_messages: HistoryMessage[], _cursor: number) { /* Gateway archives before emitting events. */ }
   close() { /* No renderer-owned database or connection. */ }
 }

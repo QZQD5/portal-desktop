@@ -4,6 +4,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createProxy } from "./proxy.mjs";
+import { installVoiceProxy } from "./voice-proxy.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "public");
 const types = {
@@ -16,6 +17,8 @@ const types = {
   ".txt": "text/plain; charset=utf-8",
   ".webmanifest": "application/manifest+json; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".mjs": "text/javascript; charset=utf-8",
 };
 const proxy = createProxy();
 const server = createServer((req, res) => {
@@ -60,12 +63,16 @@ const server = createServer((req, res) => {
     }
   });
 });
+installVoiceProxy(server);
+server.on("upgrade", (req, socket) => {
+  if (!req.url?.startsWith("/v1/realtime/")) socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+});
 server.listen(
   Number(process.env.PORT || 4174),
   process.env.HOST || "127.0.0.1",
   () => {
     console.log(
-      `Beings Town Web: http://${process.env.HOST || "127.0.0.1"}:${process.env.PORT || 4174}`,
+      `Beings Town Web: http://${process.env.HOST || "127.0.0.1"}:${server.address().port}`,
     );
   },
 );

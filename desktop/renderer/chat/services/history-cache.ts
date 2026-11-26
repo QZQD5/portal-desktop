@@ -1,5 +1,6 @@
 import type { SceneSummary } from "./client-commands";
 import { messageScene } from "../models/scenes";
+import type { Message } from "../models/chat";
 
 // Store and restore all scenes together; only network pages have a display preference.
 // Changing the visible scope never changes the cache cursor.
@@ -50,7 +51,7 @@ export function normalizeHistoryRows(messages: unknown): HistoryMessage[] {
   return [...rows.values()].sort((a, b) => a.seq - b.seq);
 }
 
-export function historyCacheDatabaseName(endpoint: string) {
+export function historyCacheDatabaseName(endpoint: string, legacy = false) {
   try {
     const url = new URL(endpoint);
     if (!["http:", "https:"].includes(url.protocol)) return null;
@@ -58,7 +59,7 @@ export function historyCacheDatabaseName(endpoint: string) {
     const scope = url.origin + url.pathname.replace(/\/+$/, "");
     // v2: Desktop now reads Gateway-local history seqs via /api/heart/history.
     // Old caches stored Heart upstream seqs and could freeze after= past Gateway.
-    return `loom-history-gateway-v2-${encodeURIComponent(scope)}`;
+    return (legacy ? 'loom-history-' : 'loom-history-gateway-v2-') + encodeURIComponent(scope);
   } catch {
     return null;
   }
@@ -76,8 +77,36 @@ export class HistoryCache {
   private opening?: Promise<IDBDatabase | null>;
   private closed = false;
   private name: string | null;
-  constructor(endpoint: string) {
-    this.name = historyCacheDatabaseName(endpoint);
+  constructor(endpoint: string, private legacy = false) {
+    this.name = historyCacheDatabaseName(endpoint, legacy);
+  }
+
+  // Cloud voice completions do not have a Loom history seq. Store them in this
+  // cache under their own key range, so the server's history cursor stays valid.
+  async readVoice(account: string, scene: string): Promise<Message[]> {
+    const db = await this.open();
+    if (!db || this.closed) return [];
+    const key = ["voice", account, scene];
+    const tx = db.transaction("meta", "readonly"), done = transactionDone(tx);
+    const request = tx.objectStore("meta").getAll(IDBKeyRange.bound(key, [...key, []]));
+    await done;
+    return request.result.map(record => record.row as Message).sort((a, b) => a.createdAt! - b.createdAt!);
+  }
+
+  async writeVoice(account: string, row: Message): Promise<void> {
+    const db = await this.open();
+    if (!db || this.closed) return;
+    const tx = db.transaction("meta", "readwrite"), done = transactionDone(tx);
+    tx.objectStore("meta").put({ key: ["voice", account, row.sceneId, row.voiceKey], row });
+    await done;
+  }
+
+  async clearVoice(): Promise<void> {
+    const db = await this.open();
+    if (!db || this.closed) return;
+    const tx = db.transaction("meta", "readwrite"), done = transactionDone(tx);
+    tx.objectStore("meta").delete(IDBKeyRange.bound(["voice"], ["voice", []]));
+    await done;
   }
 
   private open(): Promise<IDBDatabase | null> {
@@ -137,7 +166,7 @@ export class HistoryCache {
         cursor.result.continue();
       };
       await done;
-      if (!messages.length) return null;
+      if (!messages.length && !this.legacy) return null;
       // Targeted reads can cache rows beyond the fully synchronized range.
       // Only legacy databases without metadata may infer a cursor from rows.
       return { messages: messages.reverse(), lastSeq: lastSeq ?? messages.reduce((seq, message) => Math.max(seq, message.seq), 0) };

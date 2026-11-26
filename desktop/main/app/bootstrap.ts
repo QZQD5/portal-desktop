@@ -244,7 +244,10 @@ export function createDesktopApplication(options: DesktopOptions) {
       errorLog, window: () => lifecycle.window, isQuitting: () => lifecycle.quitting, shutdown: portalController.shutdown
     });
 
-    const snapshot = chat.registerSessions(handle, exclusive, () => portalController.notice, () => closePluginSessions());
+    const snapshot = chat.registerSessions(handle, exclusive, () => portalController.notice, () => {
+      closePluginSessions();
+      return voice?.syncBinding();
+    });
     registerPortalIpc({
       handle, exclusive, controller: portalController, snapshot,
       network: subagentNetwork, isQuitting: () => lifecycle.quitting,

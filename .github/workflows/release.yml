@@ -122,7 +122,6 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           echo "PORTAL_DESKTOP_MAC_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
       - run: npm ci
-      - uses: ./client/.github/actions/gateway-build-env
       - name: Cache patched Windows Node build
         id: task-node-cache
         if: runner.os == 'Windows'

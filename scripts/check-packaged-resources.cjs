@@ -22,6 +22,11 @@ compareTree('.vite/renderer', path.join(vite, 'renderer'));
 const publicRoot = path.join(vite, 'renderer', renderer);
 compareTree('desktop/generated', publicRoot);
 for (const source of external) compareTree(source, path.join(resources, path.basename(source)));
+const rendererAssets = [...expected.keys()].filter(file => file.startsWith(publicRoot + path.sep)).map(file => path.basename(file));
+for (const asset of [/^silero-v6\.2\.3(?:-[\w-]+)?\.onnx$/, /^ort-wasm-simd-threaded(?:-[\w-]+)?\.wasm$/,
+  /^ort-wasm-simd-threaded(?:-[\w-]+)?\.mjs$/, /^activity-worker(?:-[\w-]+)?\.js$/]) {
+  if (!rendererAssets.some(file => asset.test(file))) throw new Error('Missing packaged voice asset matching ' + asset);
+}
 for (const [target, source] of expected) {
   const original = fs.readFileSync(source), packaged = fs.readFileSync(target);
   if (packaged.equals(original)) continue;

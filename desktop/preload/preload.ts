@@ -45,6 +45,7 @@ async function connectorRequest(operation: keyof typeof CONNECTOR_NETWORK_METHOD
 
 const api: DesktopAPI = {
   voice: {
+    localActivity: !process.argv.includes('--portal-external-voice-gateway'),
     start: () => ipcRenderer.invoke('beings:voice-start'),
     stop: () => ipcRenderer.invoke('beings:voice-stop'),
     send: event => ipcRenderer.invoke('beings:voice-send', event),

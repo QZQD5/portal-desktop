@@ -14,6 +14,8 @@ import type { SubagentModelNetwork } from '../portal/subagent-network';
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
   '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
+  '.wasm': 'application/wasm',
   '.css': 'text/css',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
@@ -84,7 +86,8 @@ export function configureLocalSession(shellURL: () => string = () => 'beings://d
   const allow = (contents: Electron.WebContents | null, permission: string, details: { isMainFrame: boolean; requestingUrl?: string; mediaTypes?: string[]; mediaType?: string }) => {
     if (!contents || !details.isMainFrame || !trusted(contents.getURL())) return false;
     if (permission === 'notifications') return notificationsAllowed() && trusted(details.requestingUrl);
-    return permission === 'media' && details.mediaTypes?.length === 1 && details.mediaTypes[0] === 'audio';
+    if (permission !== 'media' || (details.requestingUrl && !trusted(details.requestingUrl))) return false;
+    return details.mediaTypes ? details.mediaTypes.length === 1 && details.mediaTypes[0] === 'audio' : details.mediaType === 'audio';
   };
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => callback(allow(contents, permission, details)));
   session.defaultSession.setPermissionCheckHandler((contents, permission, _origin, details) => allow(contents, permission, details));

@@ -79,6 +79,7 @@ export function isVoiceState(value: unknown): value is VoiceState {
         typeof row.streaming === 'boolean' && typeof row.visible === 'boolean')));
 }
 export interface VoiceAPI {
+  localActivity?: boolean;
   start(): Promise<void>;
   stop(): Promise<void>;
   send(event: VoiceEvent): Promise<boolean>;

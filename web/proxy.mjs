@@ -119,6 +119,13 @@ export function createProxy({
     ])
       if (typeof req.headers[name] === "string")
         headers.set(name, req.headers[name]);
+    // Keep the Loom token out of the mobile voice tool's browser URL. Older
+    // Being servers authenticate this fixed upstream using the token parameter.
+    if (prefix === "/loom-api" && ["/api/chat/stream", "/api/stream/active", "/api/interject", "/api/stop"].includes(route) &&
+        !target.searchParams.has("token") && headers.get("authorization")?.startsWith("Bearer ")) {
+      target.searchParams.set("token", headers.get("authorization").slice(7));
+      headers.delete("authorization");
+    }
     let bytes = 0;
     const limiter = new Transform({
       transform(chunk, encoding, callback) {

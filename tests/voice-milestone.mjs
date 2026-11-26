@@ -1,7 +1,8 @@
-// Real Electron capture/playback + Python child. Cloud endpoints are local fixtures.
+// Real Electron capture, local Silero and playback, against loopback Being and voice fixtures.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { builtinModules } from 'node:module';
 import { spawn } from 'node:child_process';
@@ -19,9 +20,12 @@ const profile = await mkdtemp(path.join(tmpdir(), 'portal-voice-'));
 const external = process.argv.includes('--external');
 let manual;
 async function startManual(port = 0) {
-  const child = spawn(process.env.PORTAL_DESKTOP_GATEWAY_PYTHON || 'python',
+  const gatewayRoot = process.env.PORTAL_DESKTOP_GATEWAY_ROOT || path.resolve('audio-agent-gateway');
+  const python = process.env.PORTAL_DESKTOP_GATEWAY_PYTHON || path.join(gatewayRoot, '.venv',
+    process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+  const child = spawn(python,
     ['-u', '-m', 'gateway', '--dev', '--port', String(port), '--data-dir', path.join(profile, 'gateway')],
-    { cwd: process.env.PORTAL_DESKTOP_GATEWAY_ROOT, windowsHide: true, stdio: 'pipe',
+    { cwd: gatewayRoot, windowsHide: true, stdio: 'pipe',
       env: { ...process.env, PYTHONUTF8: '1', DOUBAO_API_KEY: 'voice-test-key' } });
   manual = child;
   child.stderr.resume();
@@ -47,7 +51,7 @@ async function stopManual() {
   }
 }
 const requests = [], speech = [], cancelledResponses = [], stoppedTasks = [];
-let mode = 'hello', needTurn = false, audioInputs = 0, heldResponse = '';
+let mode = 'hello', needTurn = false, audioInputs = 0, heldResponse = '', lateResponseId = '', lastInputReplyId = '';
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   assert.equal(url.searchParams.get('token'), 'heart-test-key');
@@ -91,7 +95,14 @@ wss.on('connection', ws => {
         send({ type: 'conversation.item.input_audio_transcription.started', item_id: item });
         setTimeout(() => {
           send({ type: 'conversation.item.input_audio_transcription.completed', item_id: item, text });
-          current = crypto.randomUUID(); send({ type: 'response.output_audio.started', response_id: current });
+          if (lateResponseId) {
+            const tail = { type: 'response.output_audio.delta', audio: Buffer.alloc(9600).toString('base64') };
+            send({ ...tail, response_id: lateResponseId });
+            send(tail);
+            lateResponseId = '';
+          }
+          current = crypto.randomUUID(); lastInputReplyId = current;
+          send({ type: 'response.output_audio.started', response_id: current });
           if (text === 'delegate') {
             waiting = true;
             send({ type: 'response.function_call_arguments.done', response_id: current, items: [{ name: 'spawn_thinking', call_id: crypto.randomUUID(), arguments: JSON.stringify({ objective: '执行里程碑测试任务' }) }] });
@@ -99,7 +110,7 @@ wss.on('connection', ws => {
             heldResponse = current;
             send({ type: 'response.output_text.delta', response_id: current, text: '正在播报长回复' });
             send({ type: 'response.output_audio.delta', response_id: current, audio: Buffer.alloc(24000 * 2 * 10).toString('base64') });
-          } else finish('你好，实时语音已经连接。');
+          } else finish(text === 'hello' ? '你好，实时语音已经连接。' : '收到你的问题：' + text + '。');
         }, 80);
       }
     }
@@ -128,23 +139,24 @@ import React from 'react';
 import {createRoot} from 'react-dom/client';
 import {useVoice} from '/desktop/renderer/voice/use-voice.ts';
 import {VoiceActivity,VoiceControl} from '/desktop/renderer/voice/control.tsx';
+import '/desktop/renderer/voice/_control.scss';
 function Fixture(){const voice=useVoice(window.beings.voice,'fixture',true);window.voiceState=voice.state;return React.createElement('div',{id:'input-area',style:{position:'absolute',bottom:30,left:60,right:60}},React.createElement('button',{onClick:()=>window.fixture.sendText().then(text=>{window.textResult=text})},'发送文字打断'),React.createElement(VoiceActivity,{state:voice.state,command:voice.command}),React.createElement('div',{id:'input-row',style:{display:'grid',position:'relative'}},React.createElement(VoiceControl,{state:voice.state,command:voice.command})));}
 createRoot(document.getElementById('root')).render(React.createElement(Fixture));
 </script></html>`);
-const vite = await viteServer({ configFile: false, root: process.cwd(), server: { host: '127.0.0.1', port: 0 },
-  optimizeDeps: { entries: [path.join(root, 'index.html')], include: ['react', 'react-dom/client', 'react/jsx-runtime'] }, esbuild: { jsx: 'automatic' } });
+const vite = await viteServer({ configFile: false, root: process.cwd(), server: { host: '127.0.0.1', port: 0, hmr:false, watch:null },
+  optimizeDeps: { entries: [path.join(root, 'index.html')], include: ['react', 'react-dom/client', 'react/jsx-runtime', 'onnxruntime-web/wasm'] }, esbuild: { jsx: 'automatic' } });
 await vite.listen();
 const url = vite.resolvedUrls.local[0] + 'test-results/voice-milestone/index.html';
 await writeFile(path.join(root, 'main.cjs'), `const {app,BrowserWindow,ipcMain}=require('electron');
 app.setPath('userData',process.env.PORTAL_DESKTOP_USER_DATA);
 const {VoiceGateway}=require('./gateway.cjs'); const {configureLocalSession}=require('./protocol.cjs'); const {ChatProxy}=require('./proxy.cjs');
 app.whenReady().then(async()=>{
- const w=new BrowserWindow({show:false,width:900,height:650,webPreferences:{preload:require('node:path').join(__dirname,'text-preload.cjs'),contextIsolation:true,sandbox:true}});
+ const w=new BrowserWindow({show:false,width:900,height:650,webPreferences:{preload:require('node:path').join(__dirname,'text-preload.cjs'),contextIsolation:true,sandbox:true,additionalArguments:${JSON.stringify(external ? ['--portal-external-voice-gateway'] : [])}}});
  const voice=new VoiceGateway({directory:app.getPath('userData'),resources:${JSON.stringify(path.resolve('resources'))},packaged:false,
- binding:()=>({connection:{endpoint:'http://127.0.0.1:${server.address().port}/fixture',token:'heart-test-key'},scene:{scene_id:'fixture-scene'}}),emit:e=>{if(!w.isDestroyed()) w.webContents.send('beings:voice-event',e)}});
- const chat=new ChatProxy(()=>({endpoint:'http://127.0.0.1:${server.address().port}/fixture',token:'heart-test-key'}),(url,init)=>voice.fetchChat(url,init),()=>({scene_id:'fixture-scene'}));
+ binding:()=>({connection:{endpoint:'http://127.0.0.1:${server.address().port}/fixture',token:'heart-test-key'},scene:{scene_id:'fixture-scene',scene_meta:{client:'desktop',scene_label:'Fixture'}}}),emit:e=>{if(!w.isDestroyed()) w.webContents.send('beings:voice-event',e)}});
+ const chat=new ChatProxy(()=>({endpoint:'http://127.0.0.1:${server.address().port}/fixture',token:'heart-test-key'}),(url,init)=>voice.fetchChat(url,init),()=>({scene_id:'fixture-scene',scene_meta:{client:'desktop',scene_label:'Fixture'}}));
  ipcMain.handle('fixture:text',async()=>{const r=await chat.handle(new Request('beings://chat/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'文字打断',client_request_id:'interrupt-once'})}));if(!r.ok)throw new Error('Text send failed');return r.text()});
- configureLocalSession(c=>c===w.webContents);
+ configureLocalSession(()=>${JSON.stringify(url)});
  for(const [name,fn] of Object.entries({'start':()=>voice.start(),'stop':()=>voice.disconnect(),'send':e=>voice.send(e)})) ipcMain.handle('beings:voice-'+name,(_e,...args)=>fn(...args));
  let quitting=false; app.on('before-quit',e=>{if(!quitting){e.preventDefault();quitting=true;voice.shutdown().finally(()=>app.quit());}});
  await w.loadURL(${JSON.stringify(url)});
@@ -156,14 +168,33 @@ try {
     env: { ...process.env, PORTAL_DESKTOP_USER_DATA: profile, PORTAL_DESKTOP_VOICE_PROVIDER_URL: `ws://127.0.0.1:${wss.address().port}`,
       PORTAL_DESKTOP_GATEWAY_URL: origin, DOUBAO_API_KEY: external ? '' : 'voice-test-key' } });
   const page = await app.firstWindow();
+  const speechFixture = await readFile('audio-agent-gateway/tests/fixtures/speech-stop.pcm');
+  const probe = Buffer.concat([Buffer.alloc(32768), speechFixture, Buffer.alloc(32768)]);
+  const frames = await page.evaluate(async audio => {
+    const { ActivityDetector } = await import('/desktop/renderer/voice/activity.ts');
+    const detector = new ActivityDetector(), pcm = atob(audio), frames = [];
+    try {
+      for (let i = 0; i + 1024 <= pcm.length; i += 1024) {
+        const frame = await detector.analyze(btoa(pcm.slice(i, i + 1024)), i === 0);
+        frames.push([frame.started, frame.speaking, frame.barge, frame.quietFrames]);
+      }
+      return frames;
+    } finally { detector.close(); }
+  }, probe.toString('base64'));
+  // Golden decisions from the original Python Silero detector over the same 88 complete frames.
+  assert.equal(frames.length, 88);
+  assert.equal(createHash('sha256').update(JSON.stringify(frames)).digest('hex'),
+    'a15e0fe772930b4ea10cf6e0d3ab01c28433552b525cbbb762138760340e5b05');
   const waitForReply = (text, timeout) => page.waitForFunction(expected =>
     window.voiceState.presentation?.messages.some(row => row.visible && row.text.includes(expected)), text, { timeout });
   await page.evaluate(() => {
     window.audioStops = 0; window.audioStarted = 0; window.activeAudio = new Set();
-    window.voiceEvents = []; window.audioStartsByResponse = {};
+    window.voiceEvents = []; window.audioStartsByResponse = {}; window.startsAtCancel = {};
     window.beings.voice.onEvent(event => {
       window.voiceEvents.push(event);
       if (event.type === 'audio.delta' || event.type === 'audio.done') window.lastAudioResponse = event.responseId;
+      if (event.type === 'playback.cancelled' && event.responseId)
+        window.startsAtCancel[event.responseId] = window.audioStartsByResponse[event.responseId] || 0;
     });
     const start = AudioBufferSourceNode.prototype.start, stop = AudioBufferSourceNode.prototype.stop;
     AudioBufferSourceNode.prototype.start = function (...args) {
@@ -239,6 +270,55 @@ try {
   await writeFile(path.join(root, 'milestone.png'), Buffer.from(screenshot, 'base64'));
   await page.getByRole('button', { name: '结束语音通话', exact: true }).click();
   await page.getByRole('button', { name: '开启语音通话' }).waitFor();
+  if (!external) {
+    const offset = await page.evaluate(() => window.voiceEvents.length);
+    await page.getByRole('button', { name: '开启语音通话' }).click();
+    await page.getByText('正在聆听', { exact: true }).waitFor();
+    mode = 'delegate'; needTurn = true;
+    const playingTask = await page.waitForFunction(from => {
+      const event = window.voiceEvents.slice(from).find(e => e.type === 'response.started' && e.origin === 'announcement');
+      if (event && [...window.activeAudio].some(source => source.voiceResponseId === event.responseId))
+        return { taskId: event.taskIds[0], responseId: event.responseId };
+    }, offset);
+    const { taskId, responseId } = await playingTask.jsonValue();
+    const spokenResults = speech.filter(text => text === '任务已经由 Being 完成。').length;
+    const beforeInterruption = await page.evaluate(() => window.voiceEvents.length);
+    lateResponseId = responseId;
+    mode = '换个话题'; needTurn = true;
+    await page.waitForFunction(({ taskId, responseId }) =>
+      window.voiceEvents.some(e => e.task?.id === taskId && e.task.notificationStatus === 'interrupted') &&
+      [...window.activeAudio].every(source => source.voiceResponseId !== responseId), { taskId, responseId });
+    await waitForReply('收到你的问题：换个话题。');
+    await page.waitForFunction(id => window.audioStartsByResponse[id] > 0, lastInputReplyId);
+    const forwardedAudio = await page.evaluate(from => {
+      const events = window.voiceEvents.slice(from);
+      const transcript = events.findIndex(e => e.type === 'transcript.final' && e.role === 'user');
+      return events.slice(transcript + 1).filter(e => e.type === 'audio.delta').map(e => e.responseId);
+    }, beforeInterruption);
+    assert.deepEqual(forwardedAudio, [lastInputReplyId], 'Only the new reply’s single audio packet reached the renderer');
+    assert.equal(lateResponseId, '', 'The fixture sent late audio from the interrupted result');
+    const startsAtCancel = await page.evaluate(id => window.startsAtCancel[id], responseId);
+    assert.ok(startsAtCancel > 0, 'The task was audibly in progress before the new turn');
+
+    const readyCount = await page.evaluate(() => window.voiceEvents.filter(e => e.type === 'voice.ready').length);
+    [...wss.clients][0].terminate();
+    await page.waitForFunction(count => window.voiceEvents.filter(e => e.type === 'voice.ready').length > count, readyCount);
+    await page.getByRole('button', { name: '结束语音通话', exact: true }).click();
+    await page.getByRole('button', { name: '开启语音通话' }).click();
+    await page.getByText('正在聆听', { exact: true }).waitFor();
+    const beforeNewTurn = await page.evaluate(() => window.voiceEvents.length);
+    mode = '新的问题'; needTurn = true;
+    await page.getByText('你：新的问题', { exact: true }).waitFor();
+    await waitForReply('收到你的问题：新的问题。');
+    await page.waitForFunction(from => window.voiceEvents.slice(from).some(e =>
+      e.type === 'audio.delta' && window.audioStartsByResponse[e.responseId] > 0), beforeNewTurn);
+    assert.equal(speech.filter(text => text === '任务已经由 Being 完成。').length, spokenResults);
+    assert.equal(await page.evaluate(id => window.audioStartsByResponse[id], responseId), startsAtCancel,
+      'No late audio from the interrupted result started playback');
+    assert.deepEqual(stoppedTasks, []);
+    await page.getByRole('button', { name: '结束语音通话', exact: true }).click();
+    console.log('PASS: An ordinary new turn interrupts task audio, accepts its own reply, and does not replay the old result on reconnect or redial.');
+  }
   if (external) {
     await page.getByRole('button', { name: '开启语音通话' }).click();
     await page.getByText('正在聆听', { exact: true }).waitFor();
@@ -260,7 +340,7 @@ try {
     console.log('PASS: Manual Gateway restart/reconnect and independent process lifetime.');
   }
   assert.deepEqual(errors, []);
-  console.log('PASS: Electron microphone -> Python Gateway -> Being SSE -> speech playback; text interruption clears audio and preserves Being tasks; mute and hangup.');
+  console.log('PASS: Electron microphone, Silero VAD, realtime voice, Being task playback, text interruption, mute and hangup.');
 } finally {
   if (app) await app.close();
   await stopManual();

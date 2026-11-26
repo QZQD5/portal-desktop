@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Portal Desktop：Debug",
+      "name": "Portal Desktop：编译并运行",
       "type": "node-terminal",
       "request": "launch",
       "command": "npm start -- --inspect-electron",
@@ -10,9 +10,8 @@
         "command": "npm.cmd start -- --inspect-electron"
       },
       "cwd": "${workspaceFolder}",
-      "autoAttachChildProcesses": true,
       "env": {
-        "PORTAL_DESKTOP_GATEWAY_URL": "http://127.0.0.1:3102"
+        "PORTAL_DESKTOP_USER_DATA": "${workspaceFolder}/output/vscode-profile"
       }
     }
   ]

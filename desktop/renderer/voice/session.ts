@@ -5,6 +5,7 @@ import { createMicrophoneCaptureLifecycle } from './microphone-capture.js';
 import { createPlaybackOutputFollow } from './playback-lifecycle.js';
 import { VoicePresentationStream } from './presentation';
 import { MicrophoneInputLevel } from './input-level';
+import { ActivityDetector } from './activity';
 
 interface Playback {
   sources: Set<AudioBufferSourceNode>; resampler: ReturnType<typeof createStreamingResampler>;
@@ -27,6 +28,7 @@ export class VoiceSession {
   private muted = false;
   private microphoneEpoch = 0;
   private inputLevel = new MicrophoneInputLevel();
+  private detector?: ActivityDetector;
   private lastInputLevel = 0;
   private presentation: VoicePresentationStream;
   private presentationTimer?: ReturnType<typeof setInterval>;
@@ -37,14 +39,20 @@ export class VoiceSession {
   async start() {
     const generation = ++this.generation;
     this.context = new AudioContext();
-    await this.context.resume();
-    this.presentation.tick(this.context.currentTime);
-    this.presentationTimer = setInterval(() => {
-      this.presentation.tick(this.context?.currentTime || 0);
-      this.publishInputLevel(this.inputLevel.read());
-    }, 80);
-    this.unsubscribe = this.api.onEvent(event => this.receive(event));
     try {
+      await this.context.resume();
+      if (generation !== this.generation) return;
+      this.presentation.tick(this.context.currentTime);
+      this.presentationTimer = setInterval(() => {
+        this.presentation.tick(this.context?.currentTime || 0);
+        this.publishInputLevel(this.inputLevel.read());
+      }, 80);
+      this.unsubscribe = this.api.onEvent(event => this.receive(event));
+      if (this.api.localActivity) {
+        this.detector = new ActivityDetector();
+        await this.detector.analyze('', true);
+        if (generation !== this.generation) return;
+      }
       await this.api.start();
       if (generation !== this.generation) return;
       this.ready = true;
@@ -67,35 +75,48 @@ export class VoiceSession {
     const resampler = createStreamingResampler();
     // Bound microphone backlog to one second. Keep the normal 40 ms packet cadence.
     const buffer = new Float32Array(16000);
-    let size = 0, epoch = this.microphoneEpoch, sending = false, closed = false;
+    let size = 0, epoch = this.microphoneEpoch, sending = false, closed = false, resetActivity = true;
     const drain = async () => {
       sending = true;
       while (!closed && epoch === this.microphoneEpoch && size >= 640) {
         // A delayed IPC call can catch up without feeding a whole second to VAD in one event.
         const length = Math.min(size - size % 640, 4 * 640), batch = epoch;
         const audio = pcmBase64(buffer.subarray(0, length));
-        const sent = await this.api.send({ type: 'input_audio_buffer.append', audio }).catch(() => null);
+        const localActivity = this.detector ? await this.detector.analyze(audio, resetActivity) : undefined;
+        if (closed || batch !== this.microphoneEpoch) continue;
+        resetActivity = false;
+        const event = { type: 'input_audio_buffer.append', audio, ...(localActivity && { localActivity }) };
+        let sent = await this.api.send(event).catch(() => null);
+        // Retry these bytes without advancing Silero's recurrent state a second time.
+        while (sent === false && !closed && batch === this.microphoneEpoch) {
+          await new Promise(resolve => setTimeout(resolve, 40));
+          if (!closed && batch === this.microphoneEpoch) sent = await this.api.send(event).catch(() => null);
+        }
         if (closed || batch !== this.microphoneEpoch) continue;
         if (sent === null) {
           this.failMicrophone('麦克风音频发送失败，请重新开始语音。');
           break;
         }
-        if (sent) {
-          buffer.copyWithin(0, length, size);
-          size -= length;
-        } else {
-          // The main process explicitly declined this packet. Keep it ahead of newer PCM.
-          await new Promise(resolve => setTimeout(resolve, 40));
-        }
+        buffer.copyWithin(0, length, size);
+        size -= length;
       }
       sending = false;
     };
-    const source = context.createMediaStreamSource(media);
+    let source: MediaStreamAudioSourceNode | undefined;
+    let processor: Awaited<ReturnType<typeof createMicrophoneAudioWorkletNode>> | undefined;
+    const close = () => {
+      closed = true; size = 0;
+      this.resetInputLevel();
+      media.getTracks().forEach(track => track.stop());
+      source?.disconnect(); processor?.close();
+    };
     try {
+      if (generation !== this.generation) throw new Error('语音通话已结束。');
+      source = context.createMediaStreamSource(media);
       const workletURL = new URL('./microphone-audio-worklet-processor.js', import.meta.url).href;
-      const processor = await createMicrophoneAudioWorkletNode({ context, moduleUrl: workletURL, onSamples: samples => {
+      processor = await createMicrophoneAudioWorkletNode({ context, moduleUrl: workletURL, onSamples: samples => {
         if (closed || !this.ready || this.muted || generation !== this.generation) return;
-        if (epoch !== this.microphoneEpoch) { epoch = this.microphoneEpoch; size = 0; resampler.reset(); }
+        if (epoch !== this.microphoneEpoch) { epoch = this.microphoneEpoch; size = 0; resetActivity = true; resampler.reset(); }
         this.inputLevel.add(samples);
         const chunk = resampler.process(samples, context.sampleRate, 16000);
         if (size + chunk.length > buffer.length) {
@@ -103,11 +124,12 @@ export class VoiceSession {
           return;
         }
         buffer.set(chunk, size); size += chunk.length;
-        if (!sending && size >= 640) void drain();
+        if (!sending && size >= 640) void drain().catch(error => { if (!closed) this.failMicrophone(error.message); });
       } });
+      if (generation !== this.generation) throw new Error('语音通话已结束。');
       source.connect(processor.node); processor.node.connect(context.destination);
-      return { media, track: media.getAudioTracks()[0], close: () => { closed = true; size = 0; this.resetInputLevel(); media.getTracks().forEach(track => track.stop()); source.disconnect(); processor.close(); } };
-    } catch (error) { media.getTracks().forEach(track => track.stop()); source.disconnect(); throw error; }
+      return { media, track: media.getAudioTracks()[0], close };
+    } catch (error) { close(); throw error; }
   }
   private publishInputLevel(level: number) {
     if (level === this.lastInputLevel) return;
@@ -215,7 +237,10 @@ export class VoiceSession {
     this.resetInputLevel();
     void this.api.send({ type: value ? 'input.mute' : 'input.unmute' }).catch(() => {});
   }
-  interrupt() { this.clear(); void this.api.send({ type: 'response.cancel' }).catch(() => {}); }
+  interrupt() {
+    void this.api.send({ type: 'response.cancel' }).catch(() => {});
+    this.clear();
+  }
   private failMicrophone(message: string) {
     void this.stop().catch(() => {});
     this.event({ type: 'desktop.voice', state: 'error', message });
@@ -225,6 +250,7 @@ export class VoiceSession {
     clearInterval(this.presentationTimer);
     this.resetInputLevel();
     this.generation++; this.ready = false; this.capture?.stop(); this.follow?.stop();
+    this.detector?.close(); this.detector = undefined;
     // Preserve the rendered conversation and task records after hang-up.
     this.clear('call_ended', true);
     this.unsubscribe?.(); this.unsubscribe = undefined;

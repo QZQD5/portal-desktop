@@ -1,5 +1,6 @@
 import { loadDeployment } from "./deployment";
 import { readCredential, writeCredential } from "./credential-storage";
+import { HistoryCache } from "../desktop/renderer/chat/services/history-cache";
 export interface WebConnection {
   api: string;
   token: string;
@@ -8,7 +9,18 @@ export interface WebConnection {
   endpoint: string;
 }
 export const CONNECTION_KEY = "town-web:connection";
+export const VOICE_STORAGE_PREFIX = "town-web:voice:";
 export function saveConnection(connection: WebConnection | null): void {
+  const previous = readConnection();
+  if (!connection || previous?.endpoint !== connection.endpoint || previous.token !== connection.token) {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith(VOICE_STORAGE_PREFIX)) localStorage.removeItem(key);
+    }
+    if (previous) {
+      const history = new HistoryCache(previous.endpoint);
+      void history.clearVoice().catch(() => {}).finally(() => history.close());
+    }
+  }
   writeCredential(CONNECTION_KEY, connection);
 }
 export function parseWebConnection(value: string): WebConnection {

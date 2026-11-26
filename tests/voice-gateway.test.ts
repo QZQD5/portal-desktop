@@ -109,7 +109,7 @@ it('binds and reconnects to a local manual Gateway without a token or owning its
     expect(configs).toHaveLength(2); // No credentials sent after a failed status check.
     const count = requests.length;
     const packaged = new VoiceGateway({ ...opts, packaged: true });
-    await expect(packaged.start()).rejects.toThrow('语音组件缺失');
+    await expect(packaged.start()).rejects.toThrow('当前 Loom 凭据不能用于语音代理');
     expect(requests).toHaveLength(count); // Packaged clients ignore the development endpoint.
   } finally {
     await voice.shutdown();

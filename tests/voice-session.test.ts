@@ -68,6 +68,7 @@ it('prebuffers each response, flushes short speech, and clears audio that has no
   f.chunk('cancelled', audio);
   expect(f.sources).toHaveLength(0);
   f.session.interrupt();
+    expect(f.api.send.mock.calls.map(([event]) => event.type)).toEqual(['response.cancel', 'playback.cancelled']);
   expect(f.api.send).toHaveBeenCalledWith({ type: 'playback.cancelled', responseId: 'cancelled', reason: 'user_interruption' });
   f.chunk('cancelled', audio);
   f.receive({ type: 'audio.done', responseId: 'cancelled' });

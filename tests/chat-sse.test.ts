@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ChatEventDecoder } from '../desktop/renderer/chat/services/sse';
+import { ChatEventDecoder } from '../desktop/shared/chat-sse';
 
 describe('chat SSE framing', () => {
   const wire = '\ufeff: heartbeat\r\nevent:content_block_delta\r\ndata:{"delta":\r\ndata: {"text":"你好🌱"}}\r\n\r\nevent: message_stop\rdata: {}\r\r';

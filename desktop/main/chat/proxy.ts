@@ -57,8 +57,12 @@ export class ChatProxy {
         ['/api/local-history', '/api/local-history/scenes', '/api/local-history/import'].includes(local.pathname)) {
       if (!this.localHistory || (request.method !== 'GET' && !(request.method === 'POST' && local.pathname.endsWith('/import'))))
         return new Response('Not found', { status: 404 });
-      return this.localHistory(local.pathname + local.search, { method: request.method, headers: { 'Content-Type': 'application/json' },
-        ...(request.method === 'POST' ? { body: await request.text() } : {}), signal: request.signal });
+      const body = request.method === 'POST' ? await request.text() : undefined;
+      const active = this.getConnection();
+      if (active?.endpoint !== connection.endpoint || active.token !== connection.token)
+        return Response.json({ error: 'Being 连接已切换，请刷新对话后重试。' }, { status: 409 });
+      return this.localHistory(local.pathname + local.search, { method: request.method,
+        headers: { 'Content-Type': 'application/json', 'X-Portal-Being-Endpoint': connection.endpoint }, body, signal: request.signal });
     }
     if (local.protocol === 'beings:' && local.hostname === 'chat' && imageGenerationRoute(local.pathname)) {
       const controller = new AbortController();

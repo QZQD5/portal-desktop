@@ -32,7 +32,7 @@ import { useMessageScroll } from "./hooks/use-message-scroll";
 import { IntelligentUIExamples, type UIExampleId } from "./components/intelligent-ui-examples";
 import { ConversationSearch, searchEntries } from "./services/conversation-search";
 import { replyBubbles, historyTargetBubble, quietProgressRuns } from "./models/reply-bubbles";
-import { voiceMessages } from './models/voice-messages';
+import { voiceMessages, withVoiceHistory } from './models/voice-messages';
 import { ScheduledMessage } from './components/scheduling';
 import { splitSchedulingHint, withScheduling } from './models/scheduling';
 import {
@@ -67,6 +67,7 @@ import { MessageHoverRow } from './components/message-hover-row';
 import { ComposerSend } from "./components/composer-send";
 import { ComposerAddMenu } from './components/composer-add-menu';
 import { VoiceActivity, VoiceControl } from '../voice/control';
+import type { VoiceAction, VoiceState } from '../../shared/voice';
 import { ComposerQueueContent } from './components/composer-queue-content';
 import { canUseComposerCommand, parseComposerCommands } from './models/composer-commands';
 import {useMessageMenu} from '../shared/components/message-menu';
@@ -101,12 +102,12 @@ class ChatErrorBoundary extends Component<
     );
   }
 }
-export function ChatApp({ connection, keywordNavigation = true, mobileWeb = false }: { connection?: RuntimeOptions['connection']; keywordNavigation?: boolean; mobileWeb?: boolean } = {}) {
+export function ChatApp({ connection, keywordNavigation = true, mobileWeb = false, View = ChatView }: { connection?: RuntimeOptions['connection']; keywordNavigation?: boolean; mobileWeb?: boolean; View?: typeof ChatView } = {}) {
   usePointerFocus(typeof document !== 'undefined' && document.documentElement.dataset.chatHost === 'desktop');
   const session = useChatSession(connection);
   return (
     <ChatErrorBoundary>
-      {session ? <ChatView {...session} keywordNavigation={keywordNavigation} mobileWeb={mobileWeb} /> : <div role="status">正在连接…</div>}
+      {session ? <View {...session} keywordNavigation={keywordNavigation} mobileWeb={mobileWeb} /> : <div role="status">正在连接…</div>}
     </ChatErrorBoundary>
   );
 }
@@ -186,12 +187,14 @@ export function ChatView({
   bridge,
   keywordNavigation,
   mobileWeb,
+  webVoice,
 }: {
   state: ChatState;
   runtime: ChatRuntime;
   bridge: ChatBridge;
   keywordNavigation: boolean;
   mobileWeb: boolean;
+  webVoice?: { state: VoiceState | null; command(action: VoiceAction): void; history?: readonly Message[] };
 }) {
   useModel(state);
   const toastHosted = state.toastHosted || (parent !== window && location.protocol === 'beings:');
@@ -232,8 +235,10 @@ export function ChatView({
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const voice = state.voice || { state: 'stopped' as const, muted: false, error: '', transcript: '', task: '' };
-  const timelineItems = replyBubbles(sceneItems(withScheduling(voiceMessages(state.items.filter(item => item.kind !== "message" || !item.queued), voice), state.sceneTasks, state.currentScene), state.historyScope, state.currentScene, state.showSbsMessages));
+  const voice = webVoice?.state || state.voice || { state: 'stopped' as const, muted: false, error: '', transcript: '', task: '' };
+  const voiceCommand = webVoice?.command ?? ((action: VoiceAction) => bridge.send({ type: 'beings:voice-action', action }));
+  const historyItems = webVoice?.history?.length ? withVoiceHistory(state.items, webVoice.history) : state.items;
+  const timelineItems = replyBubbles(sceneItems(withScheduling(voiceMessages(historyItems.filter(item => item.kind !== "message" || !item.queued), voice), state.sceneTasks, state.currentScene), state.historyScope, state.currentScene, state.showSbsMessages));
   const historyWindow=useHistoryWindow(state.historyLoading ? [] : timelineItems,JSON.stringify([state.historyScope,state.currentScene.sceneId,state.showSbsMessages]),before=>runtime.loadOlderHistory(before));
   const visibleItems=historyWindow.items;
   const progressRuns = quietProgressRuns(timelineItems);
@@ -832,7 +837,7 @@ export function ChatView({
               event.preventDefault();
               messages.current.scrollBy({ top: event.deltaY, behavior: 'auto' });
             }}>
-            <VoiceActivity state={voice} command={action => bridge.send({ type: 'beings:voice-action', action })}/>
+            <VoiceActivity state={voice} command={voiceCommand}/>
             {!editingQueued && state.intelligentUIForMessage && state.intelligentUITargetTitle && <div className="iui-context-target" role="status"><Icon name="chat-spark" width="16" height="16" /><span title={`修改「${state.intelligentUITargetTitle}」`}>修改「{state.intelligentUITargetTitle}」</span><button type="button" aria-label="取消本条界面修改" data-warm-tooltip="取消本条界面修改" onClick={() => state.setIntelligentUIForMessage(false)}><Icon name="chat-close" width="14" height="14" /></button></div>}
             <div
               id="pending-files"
@@ -924,7 +929,7 @@ export function ChatView({
                   sendDraft(canChooseFollowUp && !alternate ? 'interrupt' : undefined);
                 }}
               />
-              {!editingQueued && <VoiceControl state={voice} command={action => bridge.send({ type: 'beings:voice-action', action })}/>}
+              {!editingQueued && (!mobileWeb || webVoice?.state) && <VoiceControl state={voice} command={voiceCommand}/>}
               {editingQueued ? <div className="composer-queue-edit-actions">
                 {editingQueued.item.queueNoticeTone === 'error' && editingQueued.item.queueNotice &&
                   <ErrorIndicator description={editingQueued.item.queueNotice} />}

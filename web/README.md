@@ -24,6 +24,10 @@ node server.mjs
 
 默认监听 `127.0.0.1:4174`。服务器无第三方运行依赖，无需执行 npm install。外部访问时设置 `HOST=0.0.0.0`，可用 `PORT` 改端口；线上通过 HTTPS 反向代理访问，手机与电脑均访问同一 HTTPS 地址。SSE 路径需关闭代理缓冲并配置足够的读取超时。
 
+手机 Safari、Chrome 的语音入口位于聊天输入框。通过 HTTPS 打开 Node 部署版，允许麦克风后即可前台通话。反向代理需保留外部 Host 并支持 `/v1/realtime/` 的 WebSocket Upgrade。退出聊天、切到后台或锁屏时结束收音，回到页面可重新拨打。音频通过同源服务器连接已配对的 Being 语音代理。纯静态部署仅提供现有文字对话。需要调用旧版 Being 任务 API 时，请按下节设置 `WEB_LOOM_ENDPOINT`，服务端会完成凭据转换。
+
+确认的语音转写和模型回复会保存在此设备的聊天历史缓存，按连接身份和场景隔离。刷新后能看到之前的语音对话，重新拨打时会带入本场景最近的对话上下文。断开 Being 会清除设备上该连接的语音记录。
+
 ## Being 与 Town 网络接入
 
 Node 部署版默认通过同源 `/town-api/api/*` 转发到 `https://beings.town`，支持流式转发和取消，后端不会持久化用户凭据。纯静态版默认直接请求 Town。用户在「设置 → Town 身份」直接配对，不做域名检测或连接预验证。直连需要目标服务允许 CORS；转发上游由服务端 `WEB_TOWN_ORIGIN` 配置，不能通过浏览器任意改写。自定义 Town 的手动配对提示及自动配对请求都会使用所填写的域名。
@@ -51,6 +55,9 @@ Being 与 Town 凭据分开保存在当前站点的 localStorage，重开浏览�
 ```sh
 npm run typecheck
 npx vitest run tests/web.test.ts tests/web-chat.test.ts tests/web-scenes.test.ts tests/web-pairing.test.ts tests/town.test.ts tests/town-live.test.ts tests/architecture.test.ts tests/chat-runtime.test.ts
+npx vitest run tests/web-voice.test.ts
+npm run build:web
+node tests/web-voice-browser.mjs
 ```
 
 使用本地测试服务验证配对、发言和流式回复，不向真实 Town 发送测试消息。

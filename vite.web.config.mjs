@@ -2,16 +2,22 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 import { createProxy } from "./web/proxy.mjs";
+import { installVoiceProxy } from "./web/voice-proxy.mjs";
+import { voiceInstructions } from "./scripts/voice-instructions.ts";
 
 export default defineConfig({
   root: "web",
   base: './',
+  define: { PORTAL_VOICE_INSTRUCTIONS: JSON.stringify(voiceInstructions) },
+  worker: { format: "es" },
+  optimizeDeps: { include: ["onnxruntime-web/wasm"] },
   plugins: [
     react(),
     {
       name: "town-web-api",
       configureServer(server) {
         server.middlewares.use(createProxy());
+        if (server.httpServer) installVoiceProxy(server.httpServer);
       },
     },
   ],

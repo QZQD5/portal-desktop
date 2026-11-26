@@ -51,7 +51,6 @@ jobs:
         run: rustup show
       - name: Install locked dependencies
         run: npm ci
-      - uses: ./client/.github/actions/gateway-build-env
       - name: Cache patched Windows Node build
         id: task-node-cache
         if: runner.os == 'Windows'
@@ -122,7 +121,6 @@ jobs:
           cache: npm
           cache-dependency-path: client/package-lock.json
       - run: npm ci
-      - uses: ./client/.github/actions/gateway-build-env
       - run: npm run test:all
       - uses: actions/upload-artifact@v4
         if: always()

@@ -10,6 +10,7 @@ import { useModel } from "../desktop/renderer/shared/hooks/use-model";
 import { createTownAPI } from "./town-api";
 import {
   saveConnection,
+  CONNECTION_KEY,
   parseWebConnection,
   readConnection,
   deploymentConnection,
@@ -67,6 +68,13 @@ const readRoute = () => {
 };
 export function WebApp({ installation }: { installation: InstallController }) {
   const [connection, setConnection] = useState(readConnection);
+  useEffect(() => {
+    const changed = (event: StorageEvent) => {
+      if (event.key === CONNECTION_KEY || event.key === null) setConnection(readConnection());
+    };
+    window.addEventListener("storage", changed);
+    return () => window.removeEventListener("storage", changed);
+  }, []);
   const [route, setRoute] = useState(readRoute);
   const [settings, setSettings] = useState(false);
   const [pairPrompt, setPairPrompt] = useState<string>();
@@ -128,6 +136,9 @@ export function WebApp({ installation }: { installation: InstallController }) {
   };
   const post = (message: unknown) =>
     frame.current?.contentWindow?.postMessage(message, location.origin);
+  useEffect(() => {
+    if (route.view !== "chat") post({ type: "beings:web-voice-stop" });
+  }, [route.view]);
   const refreshChat = () => {
     if (!frame.current || refreshRef.current) return;
     const id = crypto.randomUUID();
@@ -634,6 +645,7 @@ export function WebApp({ installation }: { installation: InstallController }) {
                 ref={frame}
                 src={chatSource}
                 title="Being 对话"
+                allow="microphone 'self'; autoplay 'self'"
                 referrerPolicy="no-referrer"
                 sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads"
                 onLoad={() => {

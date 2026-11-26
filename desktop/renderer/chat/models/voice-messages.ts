@@ -1,6 +1,21 @@
 import type { ChatItem, Message, Run } from './chat';
 import type { VoiceState } from '../../../shared/voice';
 
+/** Weave local voice completions into the typed timeline without assigning them a server sequence. */
+export function withVoiceHistory(items: ChatItem[], archived: readonly Message[]): ChatItem[] {
+  if (!archived.length) return items;
+  const present = new Set(items.flatMap(item => item.kind === 'message' && item.voiceKey ? [item.sceneId + '/' + item.voiceKey] : []));
+  const rows = archived.filter(row => !present.has(row.sceneId + '/' + row.voiceKey));
+  const result: ChatItem[] = [];
+  let index = 0;
+  for (const item of items) {
+    const at = item.kind === 'run' ? item.start : item.kind === 'message' ? item.createdAt : undefined;
+    while (at && index < rows.length && rows[index].createdAt! <= at) result.push(rows[index++]);
+    result.push(item);
+  }
+  return result.concat(rows.slice(index));
+}
+
 /** Keep the durable history intact while projecting the live speaker's text onto its bubble. */
 export function voiceMessages(items: ChatItem[], voice: VoiceState | null): ChatItem[] {
   const presentation = voice?.presentation;
@@ -44,7 +59,7 @@ export function voiceMessages(items: ChatItem[], voice: VoiceState | null): Chat
     const text = row.text.trim();
     if (!text) continue;
     const exists = result.some(item => item.kind === 'message' && item.role === 'user' &&
-      item.sceneId === presentation.sceneId && item.text.trim() === text);
+      item.sceneId === presentation.sceneId && (item.voiceKey ? item.voiceKey === 'user:' + row.id : item.text.trim() === text));
     if (exists) continue;
     const message: Message = { kind: 'message', id: 'voice-user-live:' + row.id, role: 'user',
       timestamp: '', label: '你', consecutive: false, sceneId: presentation.sceneId, text,

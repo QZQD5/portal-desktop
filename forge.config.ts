@@ -12,8 +12,7 @@ import { macDmgIdentifier, verifyMacSignature } from './desktop/main/updates/mac
 import pkg from './package.json';
 
 const binary = path.resolve('resources', process.platform === 'win32' ? 'heart-portal.exe' : 'heart-portal');
-const voiceRuntime = path.resolve('resources/audio-gateway');
-const extraResource = [binary, path.resolve('resources/portal-runtime'), path.resolve('resources/HEART-PORTAL-LICENSE'), path.resolve('resources/branding'), path.resolve('resources/runtime-bundle.json'), path.resolve('node_modules/npm'), path.resolve('resources/node-bin'), voiceRuntime];
+const extraResource = [binary, path.resolve('resources/portal-runtime'), path.resolve('resources/HEART-PORTAL-LICENSE'), path.resolve('resources/branding'), path.resolve('resources/runtime-bundle.json'), path.resolve('node_modules/npm'), path.resolve('resources/node-bin')];
 const rendererName = 'main_window';
 const macLocalTest = process.env.PORTAL_DESKTOP_MAC_LOCAL_TEST === '1';
 const macIdentity = macLocalTest ? '-' : signing.identity;
@@ -37,12 +36,15 @@ const config: ForgeConfig = {
   outDir: process.env.PORTAL_DESKTOP_PACKAGE_OUT || 'out',
   packagerConfig: {
     asar: true,
+    // Electron publishes its release checksums in the locked npm package as well.
+    download: { checksums: require('electron/checksums.json') },
     // Packager also derives macOS's display name from its executable name.
     executableName: process.platform === 'darwin' ? 'Portal Desktop' : 'portal-desktop',
     appBundleId: signing.clientIdentifier,
     protocols: [{ name: 'Being App', schemes: ['being-app'] }],
     ...(process.platform === 'darwin' ? {
       osxSign: macSignOptions,
+      extendInfo: { NSMicrophoneUsageDescription: 'Portal Desktop uses the microphone for voice conversations with your Being.' },
       // Match Heart Portal: Developer ID + hardened runtime + timestamp;
       // notarization is deliberately deferred, with no automatic submission.
     } : {}),
@@ -56,16 +58,6 @@ const config: ForgeConfig = {
     prePackage: async () => {
       execFileSync(process.execPath, ['scripts/check-desktop-dependencies.mjs'], { stdio: 'inherit' });
       if (!existsSync(binary)) throw new Error('Portal binary missing. Run npm run build:portal first.');
-      if (process.platform === 'win32' || process.platform === 'darwin') {
-        execFileSync(process.execPath, ['scripts/build-voice.mjs', '--source', path.resolve('audio-agent-gateway'),
-          ...(process.platform === 'darwin' && !macLocalTest ? ['--codesign-identity', macIdentity] : [])], { stdio: 'inherit' });
-        const executable = process.platform === 'win32' ? 'AudioAgentGateway.exe' : 'AudioAgentGateway';
-        if (!existsSync(path.join(voiceRuntime, executable))) throw new Error('Python Gateway runtime missing.');
-      } else {
-        execFileSync(process.execPath, ['scripts/prepare-gateway.mjs', '--package'], { stdio: 'inherit' });
-        if (!existsSync(path.join(voiceRuntime, 'gateway', '__main__.py')) &&
-            !existsSync(path.join(voiceRuntime, 'AudioAgentGateway'))) throw new Error('Python Gateway runtime missing.');
-      }
       if (process.platform === 'darwin') execFileSync(process.execPath, ['scripts/sign-macos-runtime.mjs'], { stdio: 'inherit' });
     },
     postPackage: async (_forgeConfig, result) => {

@@ -1,12 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { GatewayHistory } from '../desktop/renderer/chat/services/gateway-history';
-import { HistoryCache, historyCacheDatabaseName } from '../desktop/renderer/chat/services/history-cache';
+import { HistoryCache } from '../desktop/renderer/chat/services/history-cache';
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 it('imports legacy history before reads and never writes a second renderer history database', async () => {
   const endpoint = 'https://fixture.test/migration';
-  vi.stubGlobal('indexedDB', { databases: async () => [{ name: historyCacheDatabaseName(endpoint) }] });
+  vi.stubGlobal('indexedDB', { databases: async () => [{ name: 'loom-history-' + encodeURIComponent(endpoint) }] });
   vi.spyOn(HistoryCache.prototype, 'read').mockResolvedValue({ messages: [
     { seq: 99, role: 'user', content: '保留旧记录', scene_id: 'room' },
   ], lastSeq: 99 });
@@ -17,8 +17,11 @@ it('imports legacy history before reads and never writes a second renderer histo
     requests.push(url.pathname);
     expect(new Headers(init?.headers).get('X-Portal-Being-Endpoint')).toBe(endpoint);
     if (url.pathname.endsWith('/import')) {
-      expect(JSON.parse(String(init?.body)).messages[0].seq).toBe(99);
-      return Response.json({ ok: true });
+      const body = JSON.parse(String(init?.body));
+      expect(body.source).toBe('heart-indexeddb');
+      if (body.complete) expect(body.messages[0].seq).toBe(99);
+      else expect(body.messages).toEqual([]);
+      return Response.json({ ok: true, complete: body.complete });
     }
     return Response.json({ messages: [{ seq: 1, role: 'user', content: '保留旧记录', scene_id: 'room' }], lastSeq: 1 });
   });
@@ -26,7 +29,7 @@ it('imports legacy history before reads and never writes a second renderer histo
   expect((await history.read(100)).messages[0].seq).toBe(1);
   await history.write([{ seq: 1, role: 'user', content: '新消息' }], 1);
   expect(write).not.toHaveBeenCalled();
-  expect(requests).toEqual(['/api/local-history/import', '/api/local-history']);
+  expect(requests).toEqual(['/api/local-history/import', '/api/local-history/import', '/api/local-history']);
 });
 
 it('rejects malformed or non-advancing history instead of looping indefinitely', async () => {

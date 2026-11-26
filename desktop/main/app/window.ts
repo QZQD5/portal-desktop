@@ -1,4 +1,4 @@
-import { BrowserWindow, nativeTheme, type BrowserWindowConstructorOptions } from 'electron';
+import { app, BrowserWindow, nativeTheme, type BrowserWindowConstructorOptions } from 'electron';
 import path from 'node:path';
 import { systemIcon } from './branding';
 import { windowPresentation } from './window-presentation';
@@ -20,8 +20,12 @@ export interface MainWindowOptions {
 }
 
 export function createMainWindow(options: MainWindowOptions) {
+  const defaults = clientWindowOptions();
   const window = new BrowserWindow({
-    ...clientWindowOptions(),
+    ...defaults,
+    ...(!app.isPackaged && process.env.PORTAL_DESKTOP_GATEWAY_URL && {
+      webPreferences: { ...defaults.webPreferences, additionalArguments: ['--portal-external-voice-gateway'] },
+    }),
     ...(process.platform === 'darwin' ? { backgroundColor: '#00000000', vibrancy: 'hud' as const } : {}),
   });
   const presentation = windowPresentation(window);

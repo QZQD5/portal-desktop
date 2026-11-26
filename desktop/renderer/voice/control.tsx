@@ -1,6 +1,5 @@
 import type { VoiceAction, VoiceState } from '../../shared/voice';
 import type { CSSProperties } from 'react';
-import './voice.css';
 
 export function VoiceControl({ state, command }: { state: VoiceState; command(action: VoiceAction): void }) {
   const ready = state.state === 'ready';

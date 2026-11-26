@@ -1,14 +1,19 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { access } from 'node:fs/promises';
-import { createInterface } from 'node:readline';
-import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import type { ChatScene } from '../../shared/types';
 import type { VoiceEvent } from '../../shared/voice';
+import { RealtimeVoice, type VoiceWireHandlers } from '../../shared/voice-realtime';
+import { VoiceTasks } from '../../shared/voice-tasks';
+import { NativeChatGateway } from '../chat/native-gateway';
+import type { ArchivedMessage } from '../chat/native-history';
+import { upstreamRequest } from '../chat/proxy';
 import type { Connection } from '../chat/connection';
+import { DevelopmentGateway } from './legacy-gateway';
 
-export interface VoiceBinding { connection: Connection; scene: ChatScene }
+export interface VoiceBinding {
+  connection: Connection;
+  scene: ChatScene;
+}
 export interface GatewayOptions {
   directory: string;
   resources: string;
@@ -19,309 +24,261 @@ export interface GatewayOptions {
   emit(event: VoiceEvent): void;
   env?: NodeJS.ProcessEnv;
 }
-const COMMANDS = new Set(['input_audio_buffer.append', 'input.mute', 'input.unmute', 'response.cancel',
-  'playback.started', 'playback.ended', 'playback.cancelled', 'conversation.item.create', 'task.create', 'task.cancel']);
+
+function openProvider(binding: VoiceBinding, fixture: NodeJS.ProcessEnv | undefined, handlers: VoiceWireHandlers) {
+  const being = new URL(binding.connection.endpoint).pathname.slice(1);
+  const override = fixture?.PORTAL_DESKTOP_VOICE_PROVIDER_URL;
+  if (
+    !override &&
+    (!/^[a-zA-Z0-9_-]{1,128}$/.test(being) || !/^[a-zA-Z0-9._~-]{16,2048}$/.test(binding.connection.token))
+  )
+    throw new Error('当前 Loom 凭据不能用于语音代理。');
+  if (override && !fixture?.DOUBAO_API_KEY) throw new Error('测试上游需要 DOUBAO_API_KEY。');
+  const url = override || 'wss://101.132.86.87/v1/realtime/' + encodeURIComponent(being);
+  const socket = new WebSocket(url, {
+    headers: override
+      ? { 'X-Api-Key': fixture!.DOUBAO_API_KEY! }
+      : { Authorization: 'Bearer ' + binding.connection.token },
+    handshakeTimeout: override ? 10000 : 35000,
+    maxPayload: 4 * 1024 * 1024,
+  });
+  socket.on('open', handlers.open);
+  socket.on('message', (data, binary) => {
+    if (binary) socket.close(1003);
+    else handlers.message(data.toString());
+  });
+  socket.on('error', () => handlers.error('无法连接语音服务。'));
+  socket.on('close', code => handlers.close(code));
+  return {
+    get bufferedAmount() {
+      return socket.bufferedAmount;
+    },
+    send(text: string) {
+      socket.send(text);
+    },
+    close() {
+      if (socket.readyState === WebSocket.CONNECTING) socket.terminate();
+      else socket.close();
+    },
+  };
+}
 
 export class VoiceGateway {
-  private child?: ChildProcessWithoutNullStreams;
-  private socket?: WebSocket;
-  private origin = '';
-  private token = '';
-  private bindingKey = '';
-  private starting?: Promise<void>;
-  private preparing?: Promise<void>;
+  private legacy?: DevelopmentGateway;
+  private chat: NativeChatGateway;
+  private voice?: RealtimeVoice;
   private voiceScene = '';
+  private tasks = new Map<string, VoiceTasks>();
+  private account = '';
   private generation = 0;
-  private serviceGeneration = 0;
-  private ready = false;
-  private abortConnect?: () => void;
-  private sessionId = randomUUID();
-  private instanceId = randomUUID();
-  constructor(private options: GatewayOptions) {}
-
-  private currentKey() {
+  private get identity() {
     const binding = this.options.binding();
     return binding ? JSON.stringify([binding.connection.endpoint, binding.connection.token]) : '';
   }
+  constructor(private options: GatewayOptions) {
+    if (!options.packaged && (options.env || process.env).PORTAL_DESKTOP_GATEWAY_URL)
+      this.legacy = new DevelopmentGateway(options);
+    this.chat = new NativeChatGateway({
+      ...options,
+      fetcher: fetch,
+      onSend: scene => {
+        if (scene === this.voiceScene) this.voice?.send({ type: 'response.cancel' });
+      },
+      onReply: (scene, text) => {
+        if (scene === this.voiceScene) this.voice?.speak(text, [], 'text');
+      },
+      childStates: scene =>
+        scene
+          ? (this.tasks.get(scene)?.childStates() ?? {})
+          : Object.assign({}, ...Array.from(this.tasks.values(), tasks => tasks.childStates())),
+      onChildResult: (scene, ids, stream, text, children) => {
+        const candidates = scene ? [this.tasks.get(scene)] : this.tasks.values();
+        for (const tasks of candidates) if (tasks?.childResult(scene, ids, stream, text, children)) return true;
+        return false;
+      },
+    });
+  }
+  async ensure() {
+    if (this.legacy) return this.legacy.ensure();
+    await this.syncBinding();
+    this.chat.ensure();
+  }
   async syncBinding() {
-    if (this.bindingKey && this.bindingKey !== this.currentKey()) await this.shutdown();
+    if (this.legacy) return this.legacy.syncBinding();
+    const key = this.identity;
+    if (this.account && this.account !== key) await this.shutdown();
     else if (this.voiceScene && this.voiceScene !== this.options.binding()?.scene.scene_id) this.disconnect();
-  }
-  ensure() {
-    if (!this.preparing) this.preparing = this.prepare().finally(() => { this.preparing = undefined; });
-    return this.preparing;
-  }
-  private async prepare() {
+    if (key === this.account) return;
+    this.account = key;
     const binding = this.options.binding();
-    if (!binding) throw new Error('请先连接 Being。');
-    if (this.bindingKey && this.bindingKey !== this.currentKey()) await this.shutdown();
-    if (this.origin) return;
-    const generation = this.serviceGeneration;
-    this.bindingKey = this.currentKey();
-    const env = this.options.env || process.env;
-    if (!this.options.packaged && env.PORTAL_DESKTOP_GATEWAY_URL) await this.attach(binding, generation, env);
-    else await this.launch(binding, generation);
+    if (binding) {
+      const scope = this.taskScope(binding);
+      for (const scene of this.options.scenes?.() ?? [binding.scene]) {
+        if (this.chat.readVoiceTasks(binding.connection.endpoint, scope + scene.scene_id))
+          this.sceneTasks({ ...binding, scene });
+      }
+    }
+  }
+  async fetchChat(input: RequestInfo | URL, init?: RequestInit) {
+    if (this.legacy) return this.legacy.fetchChat(input, init);
+    await this.syncBinding();
+    return this.chat.fetchChat(input, init);
   }
   async request(pathname: string, init: RequestInit = {}) {
-    const identity = this.currentKey();
-    await this.ensure();
-    if (identity !== this.currentKey()) throw new Error('Being 连接已切换。');
-    const headers = new Headers(init.headers);
-    headers.delete('origin'); headers.delete('cookie'); headers.delete('x-relay-secret');
-    headers.delete('x-portal-being-name');
-    if (pathname.split('?', 1)[0] === '/api/heart/chat/stream' && init.method?.toUpperCase() === 'POST')
-      headers.set('x-portal-being-name', encodeURIComponent(this.options.townName?.() || ''));
-    if (this.token) headers.set('Authorization', 'Bearer ' + this.token);
-    else headers.delete('authorization');
-    try {
-      const response = await fetch(this.origin + pathname, { ...init, headers, redirect: 'error' });
-      if (!this.child && response.status === 503) {
-        const status = await fetch(this.origin + '/api/dev/status', { redirect: 'error', signal: AbortSignal.timeout(5000) });
-        const info = status.ok ? await status.json() : null;
-        if (info?.kind === 'audio-agent-gateway-dev' && info.configured === false) {
-          // An unconfigured dev process has not accepted this request; binding then retrying is safe.
-          await response.body?.cancel();
-          this.origin = '';
-          await this.ensure();
-          if (identity !== this.currentKey()) throw new Error('Being 连接已切换。');
-          return await fetch(this.origin + pathname, { ...init, headers, redirect: 'error' });
-        }
-      }
-      return response;
-    }
-    catch (error) {
-      if (!init.signal?.aborted && identity === this.currentKey() && !this.child) this.origin = '';
-      throw error;
-    }
+    if (this.legacy) return this.legacy.request(pathname, init);
+    await this.syncBinding();
+    return this.chat.localHistory(pathname, init);
   }
-  async fetchChat(input: string | URL | Request, init?: RequestInit): Promise<Response> {
-    const url = new URL(input instanceof Request ? input.url : String(input));
-    const binding = this.options.binding();
-    if (!binding || !url.href.startsWith(binding.connection.endpoint + '/')) throw new Error('Being 连接已切换。');
-    const route = url.pathname.slice(new URL(binding.connection.endpoint).pathname.replace(/\/$/, '').length);
-    if (!['/api/chat/stream', '/api/history', '/api/stream/active', '/api/stop'].includes(route))
-      throw new Error('Unsupported Gateway chat route');
-    url.searchParams.delete('token');
-    return this.request('/api/heart/' + route.slice(5) + url.search, init);
+  private taskScope(binding: VoiceBinding) {
+    return createHash('sha256').update(binding.connection.token).digest('hex') + ':';
   }
-  start() {
-    if (!this.starting) this.starting = this.connect().finally(() => { this.starting = undefined; });
-    return this.starting;
+  private sceneTasks(binding: VoiceBinding) {
+    const { connection, scene } = binding,
+      id = scene.scene_id;
+    const existing = this.tasks.get(id);
+    if (existing) return existing;
+    const storeKey = this.taskScope(binding) + id;
+    const tasks = new VoiceTasks({
+      callbackHost: true,
+      textWork: () => this.chat.activeText(id),
+      stopText: (streamId, order) => this.chat.stopText(id, streamId, order),
+      scene: () => (this.options.binding()?.scene.scene_id === id ? this.options.binding()!.scene : scene),
+      history: () => this.chat.recentVoiceContext(connection.endpoint, id),
+      load: () => this.chat.readVoiceTasks(connection.endpoint, storeKey),
+      save: rows => this.chat.saveVoiceTasks(connection.endpoint, storeKey, rows),
+      read: key => this.chat.readVoiceTasks(connection.endpoint, JSON.stringify([storeKey, key])),
+      write: (key, value) => this.chat.saveVoiceTasks(connection.endpoint, JSON.stringify([storeKey, key]), value),
+      request: (route, init) => {
+        const request = new Request('beings://chat' + route, init);
+        const upstream = upstreamRequest(request, connection);
+        return fetch(upstream.url, { ...init, headers: upstream.headers, redirect: 'error', credentials: 'omit' });
+      },
+      emit: event => {
+        if (this.voiceScene === id) this.options.emit(event);
+      },
+      speak: (text, ids) => {
+        if (this.voiceScene === id) this.voice?.speak(text, ids);
+      },
+      onTask: task => {
+        if (task.status !== 'completed' || !task.result) return;
+        this.chat.recordVoice(
+          'task-result:' + task.id,
+          {
+            role: 'assistant',
+            content: task.result,
+            ...scene,
+            scene_label: scene.scene_meta?.scene_label,
+            source: 'agent-result',
+            taskId: task.id,
+            voiceKey: 'agent:' + task.id,
+            at: new Date(task.completedAt ?? task.createdAt).toISOString(),
+            voicePending: task.notificationStatus === 'queued' || task.notificationStatus === 'pending',
+          },
+          connection.endpoint,
+        );
+      },
+    });
+    this.tasks.set(id, tasks);
+    return tasks;
   }
-  private async connect() {
-    const binding = this.options.binding();
-    if (!binding?.scene.scene_id) throw new Error('请先连接 Being 并选择聊天场景。');
-    if (this.bindingKey && this.bindingKey !== this.currentKey()) await this.shutdown();
-    if (this.ready) return;
+  async start() {
+    if (this.legacy) return this.legacy.start();
     const generation = this.generation;
-    this.bindingKey = this.currentKey();
-    this.options.emit({ type: 'desktop.voice', state: 'connecting' });
+    await this.ensure();
+    if (generation !== this.generation) throw new Error('语音通话已结束。');
+    const binding = this.options.binding();
+    if (!binding) throw new Error('请先连接 Being 并选择聊天场景。');
+    if (this.voice) return this.voice.start();
+    const { scene, connection } = binding;
+    const tasks = this.sceneTasks(binding),
+      sessionId = randomUUID();
+    const pending = new Map<string, ArchivedMessage>();
+    this.voiceScene = scene.scene_id;
+    const voice = new RealtimeVoice({
+      connect: handlers =>
+        openProvider(binding, this.options.packaged ? undefined : this.options.env || process.env, handlers),
+      history: () => this.chat.recentVoiceContext(connection.endpoint, scene.scene_id),
+      context: () => ({ being_name: this.options.townName?.() || connection.being, scene }),
+      captureTargets: () => tasks.cancellableIds(),
+      tools: tasks.tools,
+      runTool: call => tasks.run(call),
+      emit: event => {
+        if (this.voice !== voice) return;
+        if (event.type === 'voice.ready') tasks.resume();
+        if (event.type === 'desktop.voice' && (event.state === 'connecting' || event.state === 'error')) tasks.suspend();
+        if (event.type === 'playback.requested') tasks.playback(event);
+        if (event.type === 'playback.ended' || event.type === 'playback.cancelled') {
+          tasks.playback(event);
+          const key = 'voice:' + event.responseId,
+            message = pending.get(key);
+          if (message) {
+            this.chat.recordVoice(
+              'voice:' + sessionId + ':' + key,
+              {
+                ...message,
+                voicePending: false,
+                playbackStatus: event.type === 'playback.ended' ? 'ended' : 'cancelled',
+              },
+              connection.endpoint,
+            );
+            pending.delete(key);
+          }
+        }
+        if (
+          event.type === 'transcript.final' &&
+          typeof event.content === 'string' &&
+          event.content &&
+          (event.role === 'user' ||
+            (event.role === 'assistant' && event.origin !== 'announcement' && event.origin !== 'text'))
+        ) {
+          const assistant = event.role === 'assistant';
+          const key = (assistant ? 'voice:' : 'user:') + (assistant ? event.responseId : event.turnId);
+          const row: ArchivedMessage = {
+            id: key,
+            role: event.role,
+            content: event.content,
+            ...scene,
+            scene_label: scene.scene_meta?.scene_label,
+            createdAt: Date.now(),
+            sessionId,
+            turnId: event.turnId,
+            source: assistant ? 'voice-assistant' : 'voice-user',
+            at: new Date().toISOString(),
+            ...(assistant && { voiceKey: key, voicePending: true, playbackStatus: 'not_started' }),
+          };
+          if (assistant) pending.set(key, row);
+          this.chat.recordVoice('voice:' + sessionId + ':' + key, row, connection.endpoint);
+        }
+        this.options.emit(event);
+      },
+    });
+    this.voice = voice;
     try {
-      await this.ensure();
-      if (generation !== this.generation) throw new Error('语音连接已结束。');
-      const scene = await this.request('/api/scene', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(binding.scene) });
-      if (!scene.ok) throw new Error('语音场景切换失败。');
-      this.voiceScene = binding.scene.scene_id;
-      const socket = new WebSocket(this.origin.replace(/^http/, 'ws') + '/api/realtime?sessionId=' + this.sessionId,
-        { headers: this.token ? { Authorization: 'Bearer ' + this.token } : {}, maxPayload: 2 * 1024 * 1024 });
-      this.socket = socket;
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => { socket.terminate(); reject(new Error('实时语音连接超时。')); }, 60_000);
-        const fail = () => { clearTimeout(timer); reject(new Error('语音连接已断开，请重试。')); };
-        this.abortConnect = fail;
-        socket.once('error', fail);
-        socket.once('close', () => {
-          fail();
-          if (this.socket === socket) {
-            this.socket = undefined; this.ready = false;
-            if (!this.child) this.origin = '';
-            this.options.emit({ type: 'desktop.voice', state: 'stopped' });
-          }
-        });
-        socket.on('message', bytes => {
-          if (generation !== this.generation || this.socket !== socket) return;
-          let event: VoiceEvent;
-          try { event = JSON.parse(bytes.toString()); } catch { socket.terminate(); return; }
-          if (!event || typeof event.type !== 'string') { socket.terminate(); return; }
-          if (event.type === 'session.ping') {
-            socket.send(JSON.stringify({ type: 'session.pong', event_id: randomUUID(), request_event_id: event.event_id }));
-          }
-          if (event.type === 'error' && !this.ready) {
-            clearTimeout(timer); reject(new Error(String(event.message || '语音服务尚未就绪。')));
-          }
-          if (event.type === 'voice.connection' && event.state === 'unavailable' && !this.ready) {
-            clearTimeout(timer);
-            const detail = String(event.message || '');
-            const message = /\b(?:401|403)\b|unauthorized|forbidden/i.test(detail)
-              ? '语音 Gateway 鉴权失败，请检查当前 Being 链接中的 Loom token。'
-              : /Loom token/.test(detail)
-                ? '当前 Being 链接缺少 Loom token。'
-                : detail && detail.length <= 200
-                  ? detail
-                  : '语音服务连接失败，请查看 Gateway 日志。';
-            reject(new Error(message));
-          }
-          if (event.type === 'voice.ready') {
-            clearTimeout(timer); this.abortConnect = undefined; this.ready = true;
-            this.options.emit({ type: 'desktop.voice', state: 'ready' }); resolve();
-          }
-          this.options.emit(event);
-        });
-        socket.once('open', () => socket.send(JSON.stringify({ type: 'session.hello', event_id: randomUUID(),
-          protocol: { min: '7.0.0', max: '7.0.0' }, client: { type: 'desktop', instance_id: this.instanceId, label: 'Portal Desktop' },
-          being_name: this.options.townName?.() || '',
-          capabilities: ['input.audio', 'input.text', 'playback.receipts', 'tasks.commands', 'session.heartbeat'],
-          locale: 'zh-CN', time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-          connection: { voice_enabled: true, input_enabled: true, output_enabled: true, text_only: false },
-        })));
-      });
-      // Rehydrate the task activity after reconnect/restart. Voice messages
-      // are archived separately from Gateway task records, so without this
-      // snapshot a reopened voice session shows the reply but loses its
-      // expandable execution state.
-      try {
-        const response = await this.request('/api/tasks?active=false&limit=32');
-        const data = response.ok ? await response.json() as { tasks?: unknown } : null;
-        if (Array.isArray(data?.tasks)) this.options.emit({ type: 'task.snapshot', tasks: data.tasks });
-      } catch { /* Task rehydration is best effort; voice remains usable. */ }
+      await voice.start();
     } catch (error) {
-      if (generation === this.generation) {
-        this.disconnect();
-        this.options.emit({ type: 'desktop.voice', state: 'error', message: error instanceof Error ? error.message : '语音启动失败。' });
-      }
+      if (this.voice === voice) this.disconnect();
       throw error;
     }
-  }
-  private async attach(binding: VoiceBinding, generation: number, env: NodeJS.ProcessEnv) {
-    const url = new URL(env.PORTAL_DESKTOP_GATEWAY_URL!);
-    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.pathname !== '/' ||
-        url.username || url.password || url.search || url.hash) throw new Error('开发 Gateway 地址必须是 http://127.0.0.1:端口。');
-    const headers = { 'Content-Type': 'application/json' };
-    try {
-      const status = await fetch(url.origin + '/api/dev/status', { headers, redirect: 'error', signal: AbortSignal.timeout(10_000) });
-      if (!status.ok) throw new Error();
-      const info = await status.json();
-      if (info.kind !== 'audio-agent-gateway-dev' || info.protocol_version !== '7.0.0' || info.local_history_version !== 1) throw new Error();
-    } catch { throw new Error('无法连接开发 Gateway。请确认进程已启动、地址和端口正确。'); }
-    if (generation !== this.serviceGeneration) throw new Error('语音连接已结束。');
-    let configured: Response;
-    try {
-      configured = await fetch(url.origin + '/api/dev/configure', { method: 'POST', headers, redirect: 'error',
-        signal: AbortSignal.timeout(60_000), body: JSON.stringify({ being_endpoint: binding.connection.endpoint,
-          being_token: binding.connection.token, being_scene: binding.scene,
-          ...(this.options.scenes ? { being_scenes: this.options.scenes() } : {}),
-          ...(env.PORTAL_DESKTOP_VOICE_PROVIDER_URL ? { doubao_url: env.PORTAL_DESKTOP_VOICE_PROVIDER_URL } : {}),
-        }) });
-    } catch { throw new Error('开发 Gateway 配置连接中断或超时，请重试。'); }
-    if (configured.status === 409) throw new Error('开发 Gateway 正在使用另一个语音会话，请先结束该会话。');
-    if (configured.status === 503) throw new Error('语音服务尚未就绪，请检查 Gateway 配置。');
-    if (!configured.ok) throw new Error(`开发 Gateway 配置失败（HTTP ${configured.status}）。`);
-    if (generation !== this.serviceGeneration) throw new Error('语音连接已结束。');
-    this.origin = url.origin; this.token = ''; this.bindingKey = this.currentKey();
-  }
-  private async launch(binding: VoiceBinding, generation: number) {
-    const env = this.options.env || process.env;
-    // Gateway lives inside this repo (audio-agent-gateway/). Packaged builds use
-    // resources/audio-gateway from the same sources.
-    const embedded = path.resolve(this.options.resources, '..', 'audio-agent-gateway');
-    const root = this.options.packaged
-      ? path.join(this.options.resources, 'audio-gateway')
-      : path.resolve(env.PORTAL_DESKTOP_GATEWAY_ROOT || embedded);
-    const binary = path.join(root, process.platform === 'win32' ? 'AudioAgentGateway.exe' : 'AudioAgentGateway');
-    let executable = binary;
-    let args: string[] = [];
-    try {
-      await access(binary);
-    } catch {
-      await access(path.join(root, 'gateway', '__main__.py')).catch(() => {
-        throw new Error(this.options.packaged
-          ? '语音组件缺失，请使用包含语音组件的 Portal Desktop 版本。'
-          : '语音组件缺失。请在仓库内准备 audio-agent-gateway/.venv。');
-      });
-      executable = env.PORTAL_DESKTOP_GATEWAY_PYTHON
-        || path.join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
-      args = ['-u', '-m', 'gateway'];
-    }
-    if (generation !== this.serviceGeneration) throw new Error('语音连接已结束。');
-    this.token = randomBytes(32).toString('hex');
-    this.bindingKey = this.currentKey();
-    const scope = createHash('sha256').update(binding.connection.endpoint).digest('hex');
-    const childEnv: NodeJS.ProcessEnv = {
-      ...env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1',
-    };
-    // Voice is reached through the Loom-token reverse proxy documented by the
-    // Being service. The desktop gateway must not require a provider API key.
-    const child = spawn(executable, args, { cwd: root, env: childEnv, shell: false, windowsHide: true, stdio: 'pipe' });
-    this.child = child;
-    child.stderr.on('data', bytes => {
-      const message = bytes.toString().replace(binding.connection.token, '[redacted]').trim();
-      if (message) console.error(`[voice-gateway] ${message}`);
-    });
-    child.stdin.on('error', () => {});
-    child.stdin.write(JSON.stringify({ data_dir: path.join(this.options.directory, 'gateway', scope), access_token: this.token,
-      being_endpoint: binding.connection.endpoint, being_token: binding.connection.token, being_scene: binding.scene,
-      legacy_history: (this.options.scenes?.() || [binding.scene]).map(scene => ({ scene,
-        path: path.join(this.options.directory, 'voice', createHash('sha256').update(binding.connection.endpoint + '\n' + scene.scene_id).digest('hex'), 'gateway.sqlite3') })),
-      ...(!this.options.packaged && env.PORTAL_DESKTOP_VOICE_PROVIDER_URL ? { doubao_url: env.PORTAL_DESKTOP_VOICE_PROVIDER_URL } : {}),
-    }) + '\n');
-    await new Promise<void>((resolve, reject) => {
-      const lines = createInterface({ input: child.stdout });
-      const timer = setTimeout(() => { child.kill(); reject(new Error('Python Gateway 启动超时。')); }, 60_000);
-      const fail = () => { clearTimeout(timer); reject(new Error('Python Gateway 启动失败，请检查语音运行环境。')); };
-      child.once('error', fail);
-      child.once('exit', () => {
-        clearTimeout(timer); lines.close(); fail();
-        if (this.child === child) {
-          this.child = undefined; this.origin = ''; this.disconnect();
-          this.options.emit({ type: 'desktop.voice', state: 'error', message: '语音进程已退出，可以重新开启语音。' });
-        }
-      });
-      lines.on('line', line => {
-        try {
-          const event = JSON.parse(line);
-          if (event.type !== 'gateway.ready') return;
-          if (event.local_history_version !== 1) {
-            clearTimeout(timer); child.stdin.end('\n'); reject(new Error('Gateway 组件版本过旧，请重新构建本地聊天组件。')); return;
-          }
-          const url = new URL(event.origin);
-          if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.username || url.password) throw new Error('Invalid Gateway address');
-          this.origin = url.origin; clearTimeout(timer); resolve();
-        } catch { /* Non-control stdout is not forwarded to the renderer. */ }
-      });
-    });
   }
   send(event: VoiceEvent) {
-    if (!event || !COMMANDS.has(event.type)) throw new Error('不支持的语音操作。');
-    if (this.bindingKey !== this.currentKey()) { void this.shutdown(); return false; }
-    if (!this.ready || this.socket?.readyState !== WebSocket.OPEN) return false;
-    const payload = JSON.stringify({ ...event, event_id: randomUUID(),
-      ...(event.type === 'input_audio_buffer.append' ? { being_name: this.options.townName?.() || '' } : {}),
-    });
-    if (Buffer.byteLength(payload) > 64 * 1024) throw new Error('语音消息过大。');
-    if (this.socket.bufferedAmount > 64 * 1024) return false;
-    this.socket.send(payload); return true;
+    if (this.legacy) return this.legacy.send(event);
+    if (this.account !== this.identity || this.voiceScene !== this.options.binding()?.scene.scene_id) return false;
+    return this.voice?.send(event) ?? false;
   }
   disconnect() {
+    if (this.legacy) return this.legacy.disconnect();
     this.generation++;
-    this.abortConnect?.(); this.abortConnect = undefined;
-    this.ready = false;
-    const socket = this.socket; this.socket = undefined;
-    if (socket?.readyState === WebSocket.CONNECTING) socket.terminate();
-    else socket?.close();
-    this.options.emit({ type: 'desktop.voice', state: 'stopped' });
+    this.tasks.get(this.voiceScene)?.suspend();
+    this.voice?.stop();
+    this.voice = undefined;
+    this.voiceScene = '';
   }
   async shutdown() {
-    this.serviceGeneration++;
-    this.generation++;
+    if (this.legacy) return this.legacy.shutdown();
     this.disconnect();
-    const child = this.child; this.child = undefined;
-    this.origin = ''; this.bindingKey = ''; this.sessionId = randomUUID();
-    if (child && child.exitCode === null) {
-      await new Promise<void>(resolve => {
-        const timer = setTimeout(() => { child.kill(); resolve(); }, 8_000);
-        child.once('exit', () => { clearTimeout(timer); resolve(); });
-        child.stdin.end('\n');
-      });
-    }
+    for (const tasks of this.tasks.values()) tasks.dispose();
+    this.tasks.clear();
+    this.chat.dispose();
+    this.account = '';
   }
 }

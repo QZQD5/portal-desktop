@@ -734,6 +734,7 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
       await active.entry.message.cancelQueued?.();
     } finally { target.local.stopping = false; publish(); }
   };
+  runtime.activeTypedWork = () => selected.runtime.activeTypedWork();
   for (const method of ["handleFiles", "removePending"])
     runtime[method] = (...args: any[]) => {
       selected.local.files = state.files;

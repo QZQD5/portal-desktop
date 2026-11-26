@@ -30,7 +30,7 @@ export async function createDesktopChat(options: {
   const currentPluginScene = () => chatSessions?.current(store.connection?.endpoint) || chatScene;
   return {
     proxy, sessions: chatSessions, currentScene: currentPluginScene,
-    registerSessions(handle: RegisterHandler, exclusive: Exclusive, notice: () => string | undefined, closePluginSessions: () => void) {
+    registerSessions(handle: RegisterHandler, exclusive: Exclusive, notice: () => string | undefined, sceneChanged: () => void | Promise<void>) {
       const snapshot = () => ({ settings: store.settings, portal: portal.state, background: background.state, chatScene: sceneWithPortal(chatSessions?.current(store.connection?.endpoint) || chatScene), chatSessions: chatSessions?.list(store.connection?.endpoint).map(scene => sceneWithPortal(scene)!), notice: [notice() && errorLog.report('startup-notice', notice()), chatSceneNotice].filter(Boolean).join('\n') || undefined });
       handle('beings:chat-session', (operation: string, value: string, endpoint: string, sceneId?: string) => exclusive(async () => {
         if (!chatSessions || !store.connection) throw new Error('请先连接 Being，或检查场景目录。');
@@ -38,7 +38,7 @@ export async function createDesktopChat(options: {
         if (!['create', 'bind', 'select', 'rename', 'delete'].includes(operation)) throw new Error('无效的场景操作。');
         const previousPluginScene = JSON.stringify(currentPluginScene());
         await chatSessions.change(endpoint, operation as 'create' | 'bind' | 'select' | 'rename' | 'delete', value, sceneId);
-        if (JSON.stringify(currentPluginScene()) !== previousPluginScene) closePluginSessions();
+        if (JSON.stringify(currentPluginScene()) !== previousPluginScene) await sceneChanged();
         return snapshot();
       }));
       // Initial reads wait for configuration validation and upgrade recovery.

@@ -25,6 +25,11 @@ beforeEach(() => {
     if(url.pathname==='/api/stream/active')return new Response(null,{status:204});
     if(url.pathname==='/health')return new Response('OK fixture');
     if(url.pathname==='/api/history')return Response.json({messages:history});
+    if(url.pathname==='/api/local-history'){
+      const scene=url.searchParams.get('scene'), after=Number(url.searchParams.get('after')||0), before=Number(url.searchParams.get('before')||Infinity);
+      const messages=history.filter(row=>(!scene||row.scene_id===scene)&&row.seq>after&&row.seq<before);
+      return Response.json({messages,lastSeq:history.at(-1)?.seq||0});
+    }
     if(url.pathname==='/api/chat/stream'){posts.push(JSON.parse(init.body as string));if(failSend)throw new TypeError('connection lost');return Response.json({}, {status:sendStatus});}
     if(url.pathname==='/api/attachments')return Response.json({attachment_id:'att_one',status:'ready'});
     if(url.pathname==='/api/attachments/att_one/parse'){parseForces.push(JSON.parse(init.body as string).force);return Response.json({job_id:'job_one',attachment_id:'att_one',status:'pending'});}

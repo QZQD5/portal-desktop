@@ -111,21 +111,14 @@ Installation, reinstallation, upgrades, and normal startup use the Portal bundle
 
 ### Prerequisites and launch
 
-A full build requires Git, Node.js 22.12+, npm, Python 3.12+, Rust stable, and the target platform's linker tools. macOS needs Xcode Command Line Tools. Windows needs MSVC, Visual Studio C++ Build Tools, and the Windows SDK. You can skip the Portal build while working only on chat and voice.
+A full build requires Git, Node.js 22.12+, npm, Rust stable, and the target platform's linker tools. macOS needs Xcode Command Line Tools. Windows needs MSVC, Visual Studio C++ Build Tools, and the Windows SDK. You can skip the Portal build while working only on chat and voice.
 
-The Python Gateway lives in this repo under `audio-agent-gateway/`. Desktop starts it automatically; keyboard text goes straight to Being, and voice uses the Being proxy with your Loom token (no `DOUBAO_API_KEY`).
+Desktop runs chat and voice in Electron. Silero VAD detects speech locally, and the paired Being proxy handles cloud voice using your Loom credentials. In VS Code, press F5 with **Portal Desktop：编译并运行** to build and run. See [the desktop build guide](desktop/BUILDING.md) for the optional Python development gateway.
 
 ```bash
 git clone --recurse-submodules https://github.com/wpyNJU/portal-desktop.git portal-desktop
 cd portal-desktop
 npm ci
-
-# Prepare the embedded Gateway (once per clone / after dependency changes)
-cd audio-agent-gateway
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cd ..
 
 # Optional if you need local Portal tools
 npm run build:portal
@@ -167,7 +160,7 @@ The [CI workflow](.github/workflows/desktop-tests.yml) runs macOS / Windows chec
 
 ```text
 desktop/               Electron main process, preload, UI, and implementation guides
-audio-agent-gateway/   Embedded Python Gateway (chat + voice)
+audio-agent-gateway/   Optional Python development gateway and evaluation tools
 web/                   Standalone Web entry points and deployment
 plugins/sdk/           Public plugin type contracts
 docs/              Documentation index, designs, historical reviews, and seeds

@@ -251,6 +251,7 @@ export interface ChatRuntime {
   dispose(): void;
   send(text: string, files?: Attachment[] | null, options?: { mode?: "interrupt"; intelligentUI?: boolean; uiAction?: import('../../shared/intelligent-ui/surfaces').UIInteraction }): Promise<void>;
   stopCurrentTurn(): Promise<void>;
+  activeTypedWork?(): { stream_id: string; scene_id: string; status: string; order: number } | undefined;
   handleFiles(files: Iterable<File>): void;
   removePending(index: number): void;
   loadLlmConfig(): Promise<void>;

@@ -1,7 +1,5 @@
 import { expect, it } from 'vitest';
 import { createServer } from 'node:http';
-import { once } from 'node:events';
-import type { ChildProcess } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,7 +7,7 @@ import { VoiceGateway } from '../desktop/main/voice/gateway';
 import { ChatProxy } from '../desktop/main/chat/proxy';
 import { parseConnection } from '../desktop/main/chat/connection';
 
-it.skipIf(!process.env.PORTAL_DESKTOP_GATEWAY_ROOT)('routes desktop text through a real Python child and retains local history without voice or cloud access', async () => {
+it('routes desktop text through native SQLite and recovers its stream after the gateway reopens', async () => {
   const submitted: any[] = [];
   const historyReads: string[] = [], recoveryCursors: string[] = [];
   let active: any = null;
@@ -69,10 +67,7 @@ it.skipIf(!process.env.PORTAL_DESKTOP_GATEWAY_ROOT)('routes desktop text through
     let partial = '';
     while (!partial.includes('重启前')) partial += new TextDecoder().decode((await reader.read()).value);
     await reader.cancel(); // Renderer disconnect does not cancel the remote task.
-    const child = (gateway as unknown as { child: ChildProcess }).child;
-    const exited = once(child, 'exit');
-    child.kill(); // Only this fixture's child: exercise an ungraceful process exit.
-    await exited;
+    await gateway.shutdown();
     await gateway.ensure();
     await expect.poll(async () => {
       const result = await proxy.handle(new Request('beings://chat/api/history'));

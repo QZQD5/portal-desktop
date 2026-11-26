@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sceneItems } from "../desktop/renderer/chat/models/scenes";
 import { replyBubbles } from "../desktop/renderer/chat/models/reply-bubbles";
+import { voiceMessages } from "../desktop/renderer/chat/models/voice-messages";
 import { ChatState, type Message } from "../desktop/renderer/chat/models/chat";
 import { createChatRuntime } from "../desktop/renderer/chat/services/runtime";
 
@@ -57,6 +58,52 @@ describe("stream progress and persisted replies", () => {
       await f.runtime.refreshHistory();
       expect(f.replies()).toHaveLength(2);
       expect(f.replies()[1]).toMatchObject({ historySeq: 2, text: '', historyContentError: true });
+    } finally { f.runtime.dispose(); }
+  });
+
+  it('projects each live voice response onto its own history row through startup and refresh', async () => {
+    const f = fixture(), content = '同一句回复', scene = 'desktop-test', at = Date.now();
+    const first = { seq: 1, role: 'assistant', content, scene_id: scene, at: new Date(at).toISOString(),
+      voiceKey: 'voice:first', voicePending: true };
+    const second = { ...first, seq: 2, voiceKey: 'voice:second' };
+    f.history.push(first);
+    try {
+      await f.runtime.start();
+      f.history.push(second);
+      await f.runtime.refreshHistory();
+      const rows = voiceMessages(f.replies(), { state: 'ready', muted: false, error: '', transcript: '', task: '',
+        presentation: { since: at, sceneId: scene, messages: [
+          { key: first.voiceKey, at, text: content, visible: true, streaming: false },
+          { key: second.voiceKey, at, text: '同一', visible: true, streaming: true },
+        ] } });
+      expect(rows).toMatchObject([
+        { voiceKey: first.voiceKey, historySeq: 1, text: content },
+        { voiceKey: second.voiceKey, historySeq: 2, text: '同一' },
+      ]);
+      f.runtime.revealHistory([{ ...first, voicePending: false }]);
+      expect(f.replies()).toMatchObject([{ voicePending: false }, { voicePending: true }]);
+    } finally { f.runtime.dispose(); }
+  });
+
+  it.each(['during', 'after'])('preserves distinct typed and voice replies with identical text when voice history arrives %s streaming', async order => {
+    const f = fixture(), content = '收到', scene = 'desktop-test';
+    const voiceRow = { seq: 1, role: 'assistant', content, scene_id: scene, voiceKey: 'voice:other' };
+    try {
+      await f.runtime.start();
+      await f.runtime.send('问个问题');
+      await vi.advanceTimersByTimeAsync(0);
+      f.event('content_block_delta', { delta: { text: content } });
+      await vi.advanceTimersByTimeAsync(100);
+      const typed = f.replies()[0];
+      if (order === 'during') { f.history.push(voiceRow); await f.runtime.refreshHistory(); }
+      f.event('message_stop', {}); f.close();
+      await vi.advanceTimersByTimeAsync(20);
+      if (order === 'after') f.history.push(voiceRow);
+      f.history.push({ seq: 2, role: 'assistant', content, scene_id: scene });
+      await f.runtime.refreshHistory();
+      expect(typed).toMatchObject({ historySeq: 2 });
+      expect(typed.voiceKey).toBeUndefined();
+      expect(f.replies()).toMatchObject([{ historySeq: 1, voiceKey: voiceRow.voiceKey }, { historySeq: 2 }]);
     } finally { f.runtime.dispose(); }
   });
 

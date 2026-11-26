@@ -3,39 +3,30 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
-vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>(), existsSync: vi.fn() }));
-vi.mock('node:child_process', async original => ({ ...await original<typeof import('node:child_process')>(), execFileSync: vi.fn() }));
-afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
+vi.mock('node:fs', async (original) => ({
+  ...(await original<typeof import('node:fs')>()),
+  existsSync: vi.fn(),
+}));
+vi.mock('node:child_process', async (original) => ({
+  ...(await original<typeof import('node:child_process')>()),
+  execFileSync: vi.fn(),
+}));
+afterEach(() => {
+  vi.clearAllMocks();
+});
 
-it.skipIf(!['win32', 'darwin'].includes(process.platform)).each(['absent', 'prepared', 'failed'])(
-  'requires the Gateway runtime and handles the %s build', async mode => {
-    vi.resetModules();
-    const windows = process.platform === 'win32';
-    const voiceDirectory = path.resolve('resources/audio-gateway');
-    const binary = path.resolve('resources', windows ? 'heart-portal.exe' : 'heart-portal');
-    vi.mocked(existsSync).mockImplementation(file => {
-      const value = String(file);
-      if (value === binary) return true;
-      if (value === path.join(voiceDirectory, windows ? 'AudioAgentGateway.exe' : 'AudioAgentGateway')) return mode === 'prepared';
-      return true;
-    });
-    vi.mocked(execFileSync).mockImplementation((_command, args) => {
-      if (Array.isArray(args) && args[0] === 'scripts/build-voice.mjs' && mode === 'failed')
-        throw new Error('Fixture voice build failed');
-      return Buffer.alloc(0);
-    });
-    const config = (await import('../forge.config')).default;
-    const prepare = config.hooks!.prePackage as () => Promise<void>;
-    expect(config.packagerConfig!.extraResource).toContain(binary);
-    expect(config.packagerConfig!.extraResource).toContain(voiceDirectory);
-    if (mode === 'failed') await expect(prepare()).rejects.toThrow('Fixture voice build failed');
-    else if (mode === 'absent') await expect(prepare()).rejects.toThrow('Python Gateway runtime missing');
-    else await prepare();
-    expect(execFileSync).toHaveBeenCalledWith(
-      process.execPath,
-      ['scripts/build-voice.mjs', '--source', path.resolve('audio-agent-gateway'),
-        ...(!windows && process.env.PORTAL_DESKTOP_MAC_LOCAL_TEST !== '1' ? ['--codesign-identity', expect.any(String)] : [])],
-      expect.objectContaining({ stdio: 'inherit' }),
-    );
-  },
-);
+it('prepares Portal Desktop without building or shipping a Python voice runtime', async () => {
+  vi.mocked(existsSync).mockReturnValue(true);
+  const config = (await import('../forge.config')).default;
+  const resources = config.packagerConfig!.extraResource;
+  expect(resources).toContain(
+    path.resolve('resources', process.platform === 'win32' ? 'heart-portal.exe' : 'heart-portal'),
+  );
+  expect(resources).toContain(path.resolve('resources/portal-runtime'));
+  expect(resources).not.toContain(path.resolve('resources/audio-gateway'));
+  await (config.hooks!.prePackage as () => Promise<void>)();
+  const scripts = vi.mocked(execFileSync).mock.calls.map(([, args]) => args?.[0]);
+  expect(scripts).toContain('scripts/check-desktop-dependencies.mjs');
+  expect(scripts).not.toContain('scripts/build-voice.mjs');
+  expect(scripts).not.toContain('scripts/prepare-gateway.mjs');
+});
