@@ -1,9 +1,35 @@
 import { expect, it } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { VoiceActivity, VoiceControl } from '../desktop/renderer/voice/control';
 import { VoicePresentationStream } from '../desktop/renderer/voice/presentation';
 import { voiceMessages } from '../desktop/renderer/chat/models/voice-messages';
 import { normalizeHistoryRows } from '../desktop/renderer/chat/services/history-cache';
 import { isVoiceState, type VoicePresentation, type VoiceState } from '../desktop/shared/voice';
 import type { Message } from '../desktop/renderer/chat/models/chat';
+
+it('offers dictation beside calls and only enables finish once the microphone is recording', () => {
+  const idle: VoiceState = { state: 'stopped', muted: false, error: '', transcript: '', task: '', dictationAvailable: true };
+  const controls = (state: VoiceState) => renderToStaticMarkup(createElement(VoiceControl, { state, command() {} }));
+  const activity = (state: VoiceState) => renderToStaticMarkup(createElement(VoiceActivity, { state, command() {} }));
+  expect(controls(idle)).toContain('开始听写');
+  expect(controls(idle)).toContain('开启语音通话');
+  expect(controls({ ...idle, state: 'ready' })).not.toContain('开始听写');
+  const opening: VoiceState = { ...idle, state: 'connecting', dictation: 'recording', microphone: 'starting' };
+  expect(controls(opening)).toMatch(/aria-label="完成听写"[^>]*disabled/);
+  expect(controls(opening)).toContain('正在连接语音');
+  expect(controls(opening)).toContain('取消听写');
+  expect(controls({ ...opening, state: 'ready' })).toContain('正在打开麦克风');
+  const recording: VoiceState = { ...opening, state: 'ready', microphone: 'ready' };
+  expect(controls(recording)).not.toMatch(/开启语音通话|暂停收音|disabled/);
+  expect(controls(recording)).toContain('完成听写');
+  expect(controls(recording)).toContain('请说话');
+  expect(controls(recording)).toContain('dictation-waveform');
+  expect(activity(recording)).toBe('');
+  const finishing = controls({ ...recording, dictation: 'finishing' });
+  expect(finishing).toContain('正在转写');
+  expect(finishing).toMatch(/aria-label="完成听写"[^>]*disabled/);
+});
 
 function fixture() {
   let value!: VoicePresentation;

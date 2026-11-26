@@ -6,6 +6,37 @@ import WebSocket, { WebSocketServer } from "ws";
 import { installVoiceProxy } from "../web/voice-proxy.mjs";
 import { createWebVoice } from "../web/voice";
 
+it("reports an upstream rate limit through the browser relay without redialling", async () => {
+  let attempts = 0;
+  const upstream = createServer((_request, response) => {
+    attempts++;
+    response.writeHead(429).end();
+  });
+  upstream.listen(0, "127.0.0.1");
+  await once(upstream, "listening");
+  const server = createServer();
+  installVoiceProxy(server, `ws://127.0.0.1:${(upstream.address() as AddressInfo).port}/`);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  vi.stubGlobal("location", new URL(origin));
+  vi.stubGlobal("WebSocket", class extends WebSocket {
+    constructor(url: URL) { super(url, { origin }); }
+  });
+  const voice = createWebVoice({ endpoint: "https://being.example/willow", api: origin, name: "Willow",
+    token: "fixture.voice-token-0001", relaySecret: "" }, "account",
+    { scene_id: "scene", scene_meta: { client: "town-web", scene_label: "Scene" } }, () => [], () => undefined);
+  try {
+    await expect(voice.start("dictation")).rejects.toThrow("HTTP 429");
+    expect(attempts).toBe(1);
+  } finally {
+    voice.dispose();
+    vi.unstubAllGlobals();
+    await Promise.all([new Promise<void>(resolve => server.close(() => resolve())),
+      new Promise<void>(resolve => upstream.close(() => resolve()))]);
+  }
+});
+
 it("keeps two simultaneous callers' audio and credentials on their own upstream sockets", async () => {
   const provider = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(provider, "listening");
@@ -90,9 +121,8 @@ it("authenticates a browser voice connection via its first frame and forwards re
   }
 });
 
-it("keeps a delayed voice stop bound to the original typed stream and submission", async () => {
+function stubBrowserVoice(onPacket: (event: { type: string; items?: { role: string; content: { text: string }[] }[] }) => void) {
   let deliver!: (event: object) => void;
-  let result: { status: string } | undefined;
   vi.stubGlobal("location", new URL("http://localhost:4174"));
   vi.stubGlobal("WebSocket", class {
     bufferedAmount = 0;
@@ -106,9 +136,48 @@ it("keeps a delayed voice stop bound to the original typed stream and submission
       if (text === "fixture.voice-token") { deliver({ type: "web.voice.ready" }); return; }
       const event = JSON.parse(text);
       if (event.type === "session.create") queueMicrotask(() => deliver({ type: "session.created" }));
-      if (event.items?.[0].role === "tool") result = JSON.parse(event.items[0].content[0].text);
+      onPacket(event);
     }
     close() {}
+  });
+  return (event: object) => deliver(event);
+}
+
+it("keeps a dictated draft out of conversation history and only allows one microphone session", async () => {
+  const packets: string[] = [], events: string[] = [];
+  const deliver = stubBrowserVoice(event => packets.push(event.type));
+  const history = vi.fn(() => []);
+  const voice = createWebVoice({ endpoint: "https://example.test/willow", api: "http://localhost:4174/loom-api",
+    token: "fixture.voice-token", name: "willow", relaySecret: "" }, "account", {
+    scene_id: "scene-a", scene_meta: { client: "town-web", scene_label: "Scene" },
+  }, history, () => undefined);
+  voice.onEvent(event => events.push(event.type));
+  try {
+    await voice.start("dictation");
+    await expect(voice.start()).rejects.toThrow("请先结束");
+    const text = voice.finishDictation();
+    deliver({ type: "conversation.item.input_audio_transcription.completed", item_id: "turn", transcript: "待编辑的草稿" });
+    expect(await text).toBe("待编辑的草稿");
+    expect(history).not.toHaveBeenCalled();
+    expect(voice.historyRows()).toEqual([]);
+    expect(events).not.toContain("task.snapshot");
+    expect(packets).not.toContain("response.create");
+
+    await voice.stop();
+    await voice.start();
+    expect(history).toHaveBeenCalledTimes(1);
+    expect(events).toContain("task.snapshot");
+    await expect(voice.start("dictation")).rejects.toThrow("请先结束");
+  } finally {
+    voice.dispose();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("keeps a delayed voice stop bound to the original typed stream and submission", async () => {
+  let result: { status: string } | undefined;
+  const deliver = stubBrowserVoice(event => {
+    if (event.items?.[0].role === "tool") result = JSON.parse(event.items[0].content[0].text);
   });
   let resolveActive!: (response: Response) => void, order = 1;
   const requests = vi.fn(() => new Promise<Response>(resolve => { resolveActive = resolve; }));

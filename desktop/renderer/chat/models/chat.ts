@@ -222,6 +222,12 @@ export class ChatState extends Store {
   name = new URLSearchParams(location.search).get("name") || "being";
   soul: Soul = {};
   draft = "";
+  appendDictation = (text: string, sceneId: string) => {
+    if (!text || sceneId !== this.currentScene.sceneId) return;
+    if (this.draft && !/\s$/.test(this.draft)) this.draft += '\n';
+    this.draft += text;
+    this.changed();
+  };
   files: Attachment[] = [];
   queued = 0;
   sendWillQueue = false;

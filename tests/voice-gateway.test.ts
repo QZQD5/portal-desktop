@@ -17,6 +17,44 @@ async function options(env: NodeJS.ProcessEnv): Promise<GatewayOptions> {
   };
 }
 
+it.each([401, 429, 503])('handles HTTP %i from the realtime handshake', async status => {
+  let attempts = 0;
+  const server = createServer();
+  const upstream = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (request, socket, head) => {
+    attempts++;
+    if (attempts === 1 || status !== 503) {
+      socket.end(`HTTP/1.1 ${status} Test\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      return;
+    }
+    upstream.handleUpgrade(request, socket, head, peer => peer.on('message', raw => {
+      if (JSON.parse(raw.toString()).type === 'session.create') peer.send('{"type":"session.created"}');
+    }));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const opts = await options({
+    PORTAL_DESKTOP_VOICE_PROVIDER_URL: `ws://127.0.0.1:${(server.address() as { port: number }).port}/`, DOUBAO_API_KEY: 'fixture',
+  });
+  const logConnection = vi.fn();
+  const gateway = new VoiceGateway({ ...opts, logConnection });
+  try {
+    if (status === 503) {
+      await gateway.start('dictation');
+      expect(attempts).toBe(2);
+    } else {
+      await expect(gateway.start('dictation')).rejects.toThrow(`HTTP ${status}`);
+      expect(attempts).toBe(1);
+    }
+    expect(logConnection).toHaveBeenCalledWith('gateway-error', expect.any(Number), status);
+    expect(logConnection).toHaveBeenCalledWith(status === 503 ? 'session-ready' : 'session-failed', expect.any(Number));
+  } finally {
+    await gateway.shutdown();
+    for (const peer of upstream.clients) peer.terminate();
+    await new Promise<void>(resolve => upstream.close(() => resolve()));
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 it('rebinds a restarted manual Gateway before retrying an unaccepted text request', async () => {
   let configured = false, bindings = 0, accepted = 0;
   const server = createServer(async (request, response) => {
@@ -80,6 +118,8 @@ it('binds and reconnects to a local manual Gateway without a token or owning its
   opts.binding = () => ({ connection, scene: sessions.current(connection.endpoint) });
   const voice = new VoiceGateway(opts);
   try {
+    await expect(voice.start('dictation')).rejects.toThrow('不支持语音输入');
+    expect(requests).toHaveLength(0);
     await voice.start();
     expect(configs).toEqual([{ being_endpoint: 'https://being.example/fixture', being_token: 'private-being',
       being_scene: scene }]);

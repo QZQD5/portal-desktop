@@ -95,6 +95,7 @@ wss.on('connection', ws => {
         send({ type: 'conversation.item.input_audio_transcription.started', item_id: item });
         setTimeout(() => {
           send({ type: 'conversation.item.input_audio_transcription.completed', item_id: item, text });
+          wss.emit('fixture-transcribed', text);
           if (lateResponseId) {
             const tail = { type: 'response.output_audio.delta', audio: Buffer.alloc(9600).toString('base64') };
             send({ ...tail, response_id: lateResponseId });
@@ -140,7 +141,7 @@ import {createRoot} from 'react-dom/client';
 import {useVoice} from '/desktop/renderer/voice/use-voice.ts';
 import {VoiceActivity,VoiceControl} from '/desktop/renderer/voice/control.tsx';
 import '/desktop/renderer/voice/_control.scss';
-function Fixture(){const voice=useVoice(window.beings.voice,'fixture',true);window.voiceState=voice.state;return React.createElement('div',{id:'input-area',style:{position:'absolute',bottom:30,left:60,right:60}},React.createElement('button',{onClick:()=>window.fixture.sendText().then(text=>{window.textResult=text})},'发送文字打断'),React.createElement(VoiceActivity,{state:voice.state,command:voice.command}),React.createElement('div',{id:'input-row',style:{display:'grid',position:'relative'}},React.createElement(VoiceControl,{state:voice.state,command:voice.command})));}
+function Fixture(){const voice=useVoice(window.beings.voice,'fixture',true,'fixture-scene',(text,scene)=>{window.dictated={text,scene}});window.voiceState=voice.state;return React.createElement('div',{id:'input-area',style:{position:'absolute',bottom:30,left:60,right:60}},React.createElement('button',{onClick:()=>window.fixture.sendText().then(text=>{window.textResult=text})},'发送文字打断'),React.createElement(VoiceActivity,{state:voice.state,command:voice.command}),React.createElement('div',{id:'input-row',style:{display:'grid',position:'relative'}},React.createElement(VoiceControl,{state:voice.state,command:voice.command})));}
 createRoot(document.getElementById('root')).render(React.createElement(Fixture));
 </script></html>`);
 const vite = await viteServer({ configFile: false, root: process.cwd(), server: { host: '127.0.0.1', port: 0, hmr:false, watch:null },
@@ -157,7 +158,7 @@ app.whenReady().then(async()=>{
  const chat=new ChatProxy(()=>({endpoint:'http://127.0.0.1:${server.address().port}/fixture',token:'heart-test-key'}),(url,init)=>voice.fetchChat(url,init),()=>({scene_id:'fixture-scene',scene_meta:{client:'desktop',scene_label:'Fixture'}}));
  ipcMain.handle('fixture:text',async()=>{const r=await chat.handle(new Request('beings://chat/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'文字打断',client_request_id:'interrupt-once'})}));if(!r.ok)throw new Error('Text send failed');return r.text()});
  configureLocalSession(()=>${JSON.stringify(url)});
- for(const [name,fn] of Object.entries({'start':()=>voice.start(),'stop':()=>voice.disconnect(),'send':e=>voice.send(e)})) ipcMain.handle('beings:voice-'+name,(_e,...args)=>fn(...args));
+ for(const [name,fn] of Object.entries({'start':mode=>voice.start(mode),'finish-dictation':()=>voice.finishDictation(),'stop':()=>voice.disconnect(),'send':e=>voice.send(e)})) ipcMain.handle('beings:voice-'+name,(_e,...args)=>fn(...args));
  let quitting=false; app.on('before-quit',e=>{if(!quitting){e.preventDefault();quitting=true;voice.shutdown().finally(()=>app.quit());}});
  await w.loadURL(${JSON.stringify(url)});
 });`);
@@ -211,13 +212,28 @@ try {
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   assert.equal(await page.getByRole('button', { name: '语音设置' }).count(), 0);
   assert.equal(await page.locator('input[type=password]').count(), 0);
+  if (!external) {
+    assert.equal(wss.clients.size, 0);
+    await page.getByRole('button', { name: '开始听写' }).click();
+    await page.waitForFunction(() => window.voiceState.dictation === 'recording' && window.voiceState.microphone === 'ready');
+    mode = '桌面听写'; needTurn = true;
+    await once(wss, 'fixture-transcribed', { signal: AbortSignal.timeout(10000) });
+    await page.getByRole('button', { name: '完成听写' }).click();
+    await page.waitForFunction(() => window.dictated?.text === '桌面听写');
+    assert.equal(await page.evaluate(() => window.dictated.scene), 'fixture-scene');
+    assert.equal(await page.evaluate(() => window.audioStarted), 0);
+    assert.equal(requests.length, 0);
+    mode = 'hello';
+    console.log('PASS: On first launch native dictation returns a transcript without first placing a call.');
+  }
+  const framesBeforeCall = audioInputs;
   await page.evaluate(() => {
     navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Fixture has no microphone', 'NotFoundError'); };
   });
   await page.getByRole('button', { name: '开启语音通话' }).click();
   await page.getByText('麦克风暂不可用，正在重试…', { exact: true }).waitFor({ timeout: 60000 });
   await page.getByText('麦克风不可用，请检查输入设备', { exact: true }).waitFor();
-  assert.equal(audioInputs, 0);
+  assert.equal(audioInputs, framesBeforeCall);
   await page.evaluate(() => {
     delete navigator.mediaDevices.getUserMedia;
     navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
@@ -227,7 +243,7 @@ try {
   await page.getByText('你：hello', { exact: true }).waitFor();
   await waitForReply('你好，实时语音已经连接。');
   assert.equal(await page.locator('.voice-panel, .voice-popover').count(), 0);
-  assert.ok(audioInputs > 0, 'AudioWorklet sends microphone PCM');
+  assert.ok(audioInputs > framesBeforeCall, 'AudioWorklet sends microphone PCM');
   await page.waitForFunction(() => window.audioStarted > 0 && window.activeAudio.size === 0);
   const [provider] = wss.clients;
   const draft = { item_id: 'discarded-draft' };

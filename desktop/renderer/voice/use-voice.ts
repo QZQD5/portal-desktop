@@ -1,10 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { VoiceAPI, VoiceAction, VoiceState, VoicePresentation } from '../../shared/voice';
+import { publicErrorMessage } from '../../shared/errors';
 import { VoiceSession } from './session';
 
 const idle: VoiceState = { state: 'stopped', muted: false, inputLevel: 0, error: '', transcript: '', userTranscript: '', userTranscripts: [], task: '' };
-export function useVoice(api: VoiceAPI | undefined, scope: string, enabled: boolean, sceneId = '') {
+export function useVoice(api: VoiceAPI | undefined, scope: string, enabled: boolean, sceneId = '', onDictated?: (text: string, sceneId: string) => void) {
   const session = useRef<VoiceSession | undefined>(undefined);
+  const finishing = useRef<VoiceSession | undefined>(undefined);
+  const dictated = useRef(onDictated);
+  dictated.current = onDictated;
+  const dictationAvailable = Boolean(enabled && api?.finishDictation && api.localActivity !== false && onDictated);
   const generation = useRef(0);
   // Keep the rendered conversation independent from the short-lived call
   // state. The API/session can be recreated while the chat timeline remains
@@ -17,10 +22,13 @@ export function useVoice(api: VoiceAPI | undefined, scope: string, enabled: bool
   }, [api, scope]);
   const command = useCallback((action: VoiceAction) => {
     if (!api) { setState(value => ({ ...value, state: 'error', error: '桌面语音服务尚未连接，请重启客户端。' })); return; }
-    if (action === 'start') {
+    if (action === 'start' || action === 'dictate') {
       if (session.current) return;
+      const mode = action === 'dictate' ? 'dictation' : undefined;
+      if (mode && !dictationAvailable) return;
       const request = ++generation.current;
-      setState({ ...idle, state: 'connecting', microphone: 'starting' });
+      setState({ ...idle, state: 'connecting', microphone: 'starting',
+        ...(mode && { dictation: 'recording', presentation: lastPresentation.current }) });
       let unconfirmedStop: string | undefined;
       const current = new VoiceSession(api, event => {
         if (session.current !== current) return;
@@ -43,7 +51,9 @@ export function useVoice(api: VoiceAPI | undefined, scope: string, enabled: bool
             void current.stop().catch(() => {});
           }
           if (['stopped', 'connecting', 'ready', 'error'].includes(String(event.state)))
-            setState(value => ({ ...value, state: event.state as VoiceState['state'], inputLevel: 0, error: event.state === 'ready' ? '' : value.error }));
+            setState(value => ({ ...value, state: event.state as VoiceState['state'], inputLevel: 0,
+              dictation: event.state === 'stopped' || event.state === 'error' ? undefined : value.dictation,
+              error: event.state === 'ready' ? '' : value.error }));
         }
         if (event.type === 'error' || (event.type === 'desktop.voice' && event.state === 'error')) {
           unconfirmedStop = (event.error as { code?: string } | undefined)?.code === 'stop_unconfirmed' && typeof event.streamId === 'string'
@@ -80,22 +90,42 @@ export function useVoice(api: VoiceAPI | undefined, scope: string, enabled: bool
           const task = event.task as Record<string, unknown>;
           setState(value => ({ ...value, task: String(task.result || task.error || task.message || task.objective || '').slice(0, 6000) }));
         }
-      }, sceneId);
+      }, sceneId, mode);
       session.current = current;
       void current.start().catch(error => {
         if (generation.current !== request) return;
         session.current = undefined;
-        setState(value => ({ ...value, state: 'error', inputLevel: 0, error: String(error.message || '语音连接失败，请重试。').slice(0, 6000) }));
+        setState(value => ({ ...value, state: 'error', dictation: undefined, inputLevel: 0, error: publicErrorMessage(error, '语音连接失败，请重试。') }));
+      });
+    } else if (action === 'finish-dictation') {
+      const current = session.current;
+      if (current?.mode !== 'dictation' || finishing.current === current) return;
+      finishing.current = current;
+      setState(value => ({ ...value, dictation: 'finishing' }));
+      void current.finishDictation().then(text => {
+        if (session.current !== current) return;
+        dictated.current?.(text, sceneId);
+        setState({ ...idle, presentation: lastPresentation.current });
+      }).catch(error => {
+        if (session.current !== current) return;
+        setState({ ...idle, state: 'error', error: publicErrorMessage(error, '听写失败，请重试。'), presentation: lastPresentation.current });
+      }).finally(() => {
+        if (finishing.current === current) finishing.current = undefined;
+        if (session.current !== current) return;
+        session.current = undefined;
+        void current.stop().catch(() => {});
       });
     } else if (action === 'stop') {
       generation.current++;
       const current = session.current; session.current = undefined;
       setState(value => ({ ...idle, presentation: value.presentation || lastPresentation.current }));
       void current?.stop().catch(() => {});
-    } else if (action === 'mute') {
+    } else if (session.current?.mode === 'dictation') return;
+    else if (action === 'mute') {
       session.current?.mute(!state.muted);
       setState(value => ({ ...value, muted: !value.muted, inputLevel: 0 }));
     } else if (action === 'interrupt') session.current?.interrupt();
-  }, [api, enabled, state.muted, sceneId]);
-  return { state: api || state.presentation ? state : null, command };
+  }, [api, dictationAvailable, state.muted, sceneId]);
+  const visibleState = useMemo(() => api || state.presentation ? { ...state, dictationAvailable } : null, [api, state, dictationAvailable]);
+  return { state: visibleState, command };
 }

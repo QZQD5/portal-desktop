@@ -67,6 +67,28 @@ it('places a log quotation in the existing draft and never sends a chat request'
   expect(f.runtime.send).not.toHaveBeenCalled();
   f.bridge.dispose();
 });
+it('appends finished dictation only to the originating scene and draft revision, without sending', () => {
+  const f = fixture();
+  f.state.currentScene = { sceneId: 'scene', strict: true };
+  f.state.draft = '录音时手打的文字';
+  const result = { type: 'beings:dictation-result', revision: 'fixture', sceneId: 'scene', text: '口述内容' };
+  const changed = vi.fn();
+  const unsubscribe = f.state.subscribe(changed);
+  f.send(result, 'https://untrusted.example');
+  f.send({ ...result, revision: 'old' });
+  f.send({ ...result, sceneId: 'old' });
+  f.send({ ...result, text: '' });
+  expect(changed).not.toHaveBeenCalled();
+  f.send(result);
+  expect(f.state.draft).toBe('录音时手打的文字\n口述内容');
+  expect(changed).toHaveBeenCalledOnce();
+  f.state.draft += '\n  ';
+  f.send({ ...result, text: '第二段' });
+  expect(f.state.draft).toBe('录音时手打的文字\n口述内容\n  第二段');
+  expect(f.runtime.send).not.toHaveBeenCalled();
+  unsubscribe();
+  f.bridge.dispose();
+});
 it.each(['draft', 'attachment'])('preserves an existing %s when a log reference is requested', kind => {
   const f = fixture();
   if (kind === 'draft') f.state.draft = 'existing draft';
@@ -149,9 +171,11 @@ it('accepts only boolean reasoning preferences from the trusted parent', () => {
   f.bridge.dispose();
 });
 
-it('requests shell preferences after the chat listener is ready', () => {
+it('requests shell preferences and current voice capabilities when the chat listener is ready', () => {
   const f = fixture();
-  expect(f.parent.postMessage.mock.calls.map(call => call[0])).toContainEqual({type:'beings:appearance-request',revision:'fixture'});
+  const messages = f.parent.postMessage.mock.calls.map(call => call[0]);
+  expect(messages).toContainEqual({type:'beings:appearance-request',revision:'fixture'});
+  expect(messages).toContainEqual({type:'beings:voice-state-request',revision:'fixture'});
   f.bridge.dispose();
 });
 

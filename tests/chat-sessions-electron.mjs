@@ -66,8 +66,12 @@ review: try {
   ` }, bundle: true, platform: 'browser', format: 'iife', define: { 'process.env.NODE_ENV': '"production"' }, outfile: path.join(directory, 'shell.js') });
   await build({ stdin: { loader: 'ts', resolveDir: process.cwd(), contents: `
     const {contextBridge, ipcRenderer} = require('electron');
+    let voiceStarts = 0;
     contextBridge.exposeInMainWorld('beings', {
       platform: process.platform, snapshot: () => ipcRenderer.invoke('snapshot'),
+      voice: { localActivity: true, start: async () => { voiceStarts++; }, stop: async () => {},
+        send: async () => true, finishDictation: async () => '', onEvent: () => () => {} },
+      voiceStartCount: () => voiceStarts,
       sceneTasks: () => Promise.resolve({endpoint:'https://fixture.test/being',tasks:[],subagentReady:false,subagentConfigured:false,subagentEnabled:false}),
       changeChatSession: (operation,value,endpoint,sceneId) => ipcRenderer.invoke('session',operation,value,endpoint,sceneId),
     });
@@ -128,6 +132,21 @@ review: try {
     await chat.getByText('回复：子智能体预算本地回归',{exact:true}).waitFor();
     console.log('Computer-use Electron fixture ready');
     await page.waitForEvent('close',{timeout:0});
+    break review;
+  }
+  const microphone = chat.getByRole('button', { name: '开始听写', exact: true });
+  await microphone.waitFor();
+  assert.equal(await page.evaluate(() => window.beings.voiceStartCount()), 0);
+  if (process.argv.includes('--dictation-startup')) {
+    const chatFrame = page.frames().find(frame => frame.url().startsWith('beings://chat/'));
+    await Promise.all([
+      chatFrame.waitForNavigation({ waitUntil: 'domcontentloaded' }),
+      chatFrame.evaluate(() => location.reload()),
+    ]);
+    await waitForChatReady(page);
+    await microphone.waitFor();
+    assert.equal(await page.evaluate(() => window.beings.voiceStartCount()), 0);
+    console.log('PASS: Dictation is visible on cold start and after a chat-only reload, before any voice session.');
     break review;
   }
   await page.evaluate(async () => {

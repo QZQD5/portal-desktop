@@ -15,6 +15,7 @@ interface Playback {
 export class VoiceSession {
   private context?: AudioContext;
   private capture?: ReturnType<typeof createMicrophoneCaptureLifecycle>;
+  private flushMicrophone?: () => Promise<void>;
   private follow?: ReturnType<typeof createPlaybackOutputFollow>;
   private unsubscribe?: () => void;
   private playing = new Map<string, Playback>();
@@ -32,7 +33,7 @@ export class VoiceSession {
   private lastInputLevel = 0;
   private presentation: VoicePresentationStream;
   private presentationTimer?: ReturnType<typeof setInterval>;
-  constructor(private api: VoiceAPI, private event: (event: VoiceEvent) => void, sceneId = '') {
+  constructor(private api: VoiceAPI, private event: (event: VoiceEvent) => void, sceneId = '', readonly mode?: 'dictation') {
     this.presentation = new VoicePresentationStream(sceneId, presentation => this.event({ type: 'desktop.presentation', presentation }));
   }
 
@@ -40,22 +41,28 @@ export class VoiceSession {
     const generation = ++this.generation;
     this.context = new AudioContext();
     try {
-      await this.context.resume();
-      if (generation !== this.generation) return;
-      this.presentation.tick(this.context.currentTime);
-      this.presentationTimer = setInterval(() => {
-        this.presentation.tick(this.context?.currentTime || 0);
-        this.publishInputLevel(this.inputLevel.read());
-      }, 80);
-      this.unsubscribe = this.api.onEvent(event => this.receive(event));
-      if (this.api.localActivity) {
-        this.detector = new ActivityDetector();
-        await this.detector.analyze('', true);
-        if (generation !== this.generation) return;
-      }
-      await this.api.start();
+      // The provider may finish its handshake while the local audio runtime is still loading.
+      let upstreamReady: VoiceEvent | undefined;
+      this.unsubscribe = this.api.onEvent(event => {
+        if (!this.ready && event.type === 'desktop.voice') {
+          upstreamReady = event.state === 'ready' ? event : undefined;
+          if (upstreamReady) return;
+        }
+        this.receive(event);
+      });
+      if (this.api.localActivity) this.detector = new ActivityDetector();
+      await Promise.all([
+        this.context.resume(),
+        this.detector?.analyze('', true),
+        this.mode ? this.api.start(this.mode) : this.api.start(),
+      ]);
       if (generation !== this.generation) return;
       this.ready = true;
+      if (!this.mode) this.presentation.tick(this.context.currentTime);
+      this.presentationTimer = setInterval(() => {
+        if (!this.mode) this.presentation.tick(this.context?.currentTime || 0);
+        this.publishInputLevel(this.inputLevel.read());
+      }, 80);
       this.capture = createMicrophoneCaptureLifecycle({ mediaDevices: navigator.mediaDevices,
         acquire: () => this.acquire(generation),
         onState: ({ state }) => {
@@ -65,9 +72,16 @@ export class VoiceSession {
         onFatalError: error => this.failMicrophone(error.message || '无法使用麦克风。'),
       });
       this.capture.start();
-      this.follow = createPlaybackOutputFollow({ mediaDevices: navigator.mediaDevices, getContext: () => this.context });
-      this.follow.start();
-    } catch (error) { await this.stop(); throw error; }
+      if (!this.mode) {
+        this.follow = createPlaybackOutputFollow({ mediaDevices: navigator.mediaDevices, getContext: () => this.context });
+        this.follow.start();
+      }
+      if (upstreamReady) this.receive(upstreamReady);
+    } catch (error) {
+      if (generation !== this.generation) return;
+      await this.stop();
+      throw error;
+    }
   }
   private async acquire(generation: number) {
     const context = this.context!;
@@ -76,6 +90,7 @@ export class VoiceSession {
     // Bound microphone backlog to one second. Keep the normal 40 ms packet cadence.
     const buffer = new Float32Array(16000);
     let size = 0, epoch = this.microphoneEpoch, sending = false, closed = false, resetActivity = true;
+    let delivery: Promise<void> | undefined;
     const drain = async () => {
       sending = true;
       while (!closed && epoch === this.microphoneEpoch && size >= 640) {
@@ -106,9 +121,21 @@ export class VoiceSession {
     let processor: Awaited<ReturnType<typeof createMicrophoneAudioWorkletNode>> | undefined;
     const close = () => {
       closed = true; size = 0;
+      if (this.flushMicrophone === flush) this.flushMicrophone = undefined;
       this.resetInputLevel();
       media.getTracks().forEach(track => track.stop());
       source?.disconnect(); processor?.close();
+    };
+    const flush = async () => {
+      await delivery;
+      if (closed) return;
+      const tail = resampler.flush();
+      buffer.set(tail, size); size += tail.length;
+      if (size) {
+        const padded = Math.ceil(size / 640) * 640;
+        buffer.fill(0, size, padded); size = padded;
+        await drain();
+      }
     };
     try {
       if (generation !== this.generation) throw new Error('语音通话已结束。');
@@ -124,10 +151,11 @@ export class VoiceSession {
           return;
         }
         buffer.set(chunk, size); size += chunk.length;
-        if (!sending && size >= 640) void drain().catch(error => { if (!closed) this.failMicrophone(error.message); });
+        if (!sending && size >= 640) delivery = drain().catch(error => { if (!closed) this.failMicrophone(error.message); });
       } });
       if (generation !== this.generation) throw new Error('语音通话已结束。');
       source.connect(processor.node); processor.node.connect(context.destination);
+      if (this.mode) this.flushMicrophone = flush;
       return { media, track: media.getAudioTracks()[0], close };
     } catch (error) { close(); throw error; }
   }
@@ -200,6 +228,10 @@ export class VoiceSession {
     source.start(at);
   }
   private receive(event: VoiceEvent) {
+    if (this.mode) {
+      if (event.type === 'desktop.voice' || event.type === 'error') this.event(event);
+      return;
+    }
     if (event.type === 'audio.done') {
       const id = String(event.responseId || ''), item = this.playing.get(id);
       if (item) {
@@ -245,6 +277,14 @@ export class VoiceSession {
     void this.stop().catch(() => {});
     this.event({ type: 'desktop.voice', state: 'error', message });
   }
+  async finishDictation() {
+    if (!this.ready || !this.flushMicrophone || !this.api.finishDictation) throw new Error('麦克风尚未就绪。');
+    this.ready = false;
+    await this.flushMicrophone();
+    if (!this.context) throw new Error('听写已取消。');
+    this.capture?.stop();
+    return this.api.finishDictation();
+  }
   async stop() {
     if (!this.context) return;
     clearInterval(this.presentationTimer);
@@ -252,7 +292,7 @@ export class VoiceSession {
     this.generation++; this.ready = false; this.capture?.stop(); this.follow?.stop();
     this.detector?.close(); this.detector = undefined;
     // Preserve the rendered conversation and task records after hang-up.
-    this.clear('call_ended', true);
+    if (!this.mode) this.clear('call_ended', true);
     this.unsubscribe?.(); this.unsubscribe = undefined;
     const context = this.context; this.context = undefined;
     await Promise.all([context?.close().catch(() => {}), this.api.stop()]);

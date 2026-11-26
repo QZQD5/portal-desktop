@@ -1,6 +1,6 @@
 import type { ChatScene } from "../desktop/shared/types";
-import type { VoiceAPI, VoiceEvent } from "../desktop/shared/voice";
-import { RealtimeVoice } from "../desktop/shared/voice-realtime";
+import { voiceHandshakeFailure, type VoiceAPI, type VoiceEvent } from "../desktop/shared/voice";
+import { RealtimeVoice, type RealtimeVoiceOptions } from "../desktop/shared/voice-realtime";
 import { VoiceTasks } from "../desktop/shared/voice-tasks";
 import { VOICE_STORAGE_PREFIX, type WebConnection } from "./connection";
 import { readCredential, writeCredential } from "./credential-storage";
@@ -41,27 +41,28 @@ export function createWebVoice(connection: WebConnection, account: string, scene
     emit,
     speak: (text, ids) => realtime.speak(text, ids),
   });
+  const connect: RealtimeVoiceOptions["connect"] = handlers => {
+    const beingId = new URL(connection.endpoint).pathname.replace(/^\/+|\/+$/g, "");
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(beingId)) throw new Error("当前 Being 链接不能用于语音通话。");
+    const url = new URL("/v1/realtime/" + beingId, location.origin);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(url);
+    let connected = false;
+    socket.onopen = () => socket.send(connection.token);
+    socket.onmessage = event => {
+      if (connected) { handlers.message(event.data); return; }
+      if (event.data === '{"type":"web.voice.ready"}') { connected = true; handlers.open(); }
+      else { handlers.error("语音代理握手失败。", false); socket.close(); }
+    };
+    socket.onclose = event => {
+      const rejection = !connected && /^Voice upstream HTTP (\d{3})$/.exec(event.reason);
+      if (rejection) handlers.error(...voiceHandshakeFailure(Number(rejection[1])));
+      else handlers.close(event.code);
+    };
+    return { get bufferedAmount() { return socket.bufferedAmount; }, send: text => socket.send(text), close: () => socket.close() };
+  };
   const realtime = new RealtimeVoice({
-    connect(handlers) {
-      const beingId = new URL(connection.endpoint).pathname.replace(/^\/+|\/+$/g, "");
-      if (!/^[A-Za-z0-9_-]{1,128}$/.test(beingId)) throw new Error("当前 Being 链接不能用于语音通话。");
-      const url = new URL("/v1/realtime/" + beingId, location.origin);
-      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(url);
-      let connected = false;
-      socket.onopen = () => socket.send(connection.token);
-      socket.onmessage = event => {
-        if (connected) { handlers.message(event.data); return; }
-        if (event.data === '{"type":"web.voice.ready"}') { connected = true; handlers.open(); }
-        else { handlers.error("语音代理握手失败。"); socket.close(); }
-      };
-      socket.onerror = () => handlers.error("语音服务连接失败，请检查网络连接。");
-      socket.onclose = event => {
-        if (!connected && event.code !== 1008 && event.reason) handlers.error(event.reason);
-        handlers.close(event.code);
-      };
-      return { get bufferedAmount() { return socket.bufferedAmount; }, send: text => socket.send(text), close: () => socket.close() };
-    },
+    connect,
     emit(event) {
       // Providers also transcribe announcements and read-aloud text that already
       // has a chat bubble. Archive only the user's turn and the model's own reply.
@@ -89,13 +90,37 @@ export function createWebVoice(connection: WebConnection, account: string, scene
     context: () => ({ being_name: connection.name, scene }), captureTargets: () => tasks.cancellableIds(),
     tools: tasks.tools, runTool: call => tasks.run(call),
   });
+  let active: { client: RealtimeVoice; mode?: "dictation" } | undefined;
+  const stop = () => {
+    const session = active;
+    active = undefined;
+    session?.client.stop();
+  };
   return {
     historyRows: () => archived,
     localActivity: true,
-    start: () => realtime.start(),
-    stop: async () => realtime.stop(),
-    send: async event => realtime.send(event),
+    async start(mode?: "dictation") {
+      if (active) {
+        if (active.mode !== mode) throw new Error("请先结束当前语音通话或语音输入。");
+        return active.client.start();
+      }
+      const client = mode === "dictation" ? new RealtimeVoice({ connect, dictation: true, emit }) : realtime;
+      const session = { client, mode };
+      active = session;
+      try {
+        await client.start();
+      } catch (error) {
+        if (active === session) stop();
+        throw error;
+      }
+    },
+    async finishDictation() {
+      if (!active) throw new Error("语音输入未连接。");
+      return active.client.finishDictation();
+    },
+    stop: async () => stop(),
+    send: async event => active?.client.send(event) ?? false,
     onEvent(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    dispose() { realtime.stop(); tasks.dispose(); cache.close(); listeners.clear(); },
+    dispose() { stop(); tasks.dispose(); cache.close(); listeners.clear(); },
   } satisfies VoiceAPI & { historyRows(): Message[]; dispose(): void };
 }

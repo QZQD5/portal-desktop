@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { RealtimeVoice, voiceToolCatalog, type VoiceWireHandlers } from '../desktop/shared/voice-realtime';
 import type { VoiceEvent } from '../desktop/shared/voice';
 
-async function call(seedHistory = false) {
+function opening(seedHistory = false, dictation = false) {
   const connections: VoiceWireHandlers[] = [];
   const wire: VoiceEvent[] = [],
     events: VoiceEvent[] = [];
@@ -15,6 +15,7 @@ async function call(seedHistory = false) {
     close: vi.fn(),
   };
   const voice = new RealtimeVoice({
+    dictation,
     connect(handlers) {
       connections.push(handlers);
       return socket;
@@ -31,13 +32,241 @@ async function call(seedHistory = false) {
   });
   const receive = (event: VoiceEvent) => connections.at(-1)!.message(JSON.stringify(event));
   const joined = voice.start();
-  connections[0].open();
-  receive({ type: 'session.created' });
-  await joined;
-  return { voice, wire, events, receive, connections, runTool, socket };
+  return { voice, wire, events, receive, connections, runTool, socket, joined };
+}
+
+async function call(seedHistory = false, dictation = false) {
+  const c = opening(seedHistory, dictation);
+  c.connections[0].open();
+  c.receive({ type: 'session.created' });
+  await c.joined;
+  return c;
 }
 
 afterEach(() => vi.useRealTimers());
+
+const asr = 'conversation.item.input_audio_transcription.';
+
+it.each([false, true])('recovers a transient first handshake without a second start (dictation: %s)', async dictation => {
+  vi.useFakeTimers();
+  const c = opening(false, dictation);
+  const first = c.connections[0];
+  if (dictation) first.error('连接被重置', true);
+  else first.close(1006);
+  expect(c.voice.start()).toBe(c.joined);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(c.connections).toHaveLength(2);
+  first.error('过期的连接', false);
+  first.open();
+  first.message('{"type":"session.created"}');
+  expect(c.wire).toHaveLength(0);
+  c.connections[1].open();
+  c.receive({ type: 'session.created' });
+  await c.joined;
+  expect(c.events.filter(e => e.type === 'desktop.voice').map(e => e.state)).toEqual(['connecting', 'ready']);
+  c.voice.stop();
+});
+
+it('only retries a transient first connection once', async () => {
+  vi.useFakeTimers();
+  const c = opening();
+  const failure = expect(c.joined).rejects.toThrow('语音连接已断开');
+  c.connections[0].close(1011);
+  await vi.advanceTimersByTimeAsync(500);
+  c.connections[1].close(1006);
+  await failure;
+  await vi.advanceTimersByTimeAsync(35_000);
+  expect(c.connections).toHaveLength(2);
+});
+
+it('keeps the original 35 second deadline across a slow first handshake and retry', async () => {
+  vi.useFakeTimers();
+  const c = opening(false, true);
+  const failure = expect(c.joined).rejects.toThrow('连接超时');
+  await vi.advanceTimersByTimeAsync(30_000);
+  c.connections[0].error('临时网络错误', true);
+  await vi.advanceTimersByTimeAsync(4_999);
+  expect(c.connections).toHaveLength(2);
+  expect(c.events.some(e => e.state === 'error')).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  await failure;
+});
+
+it('cancels during the first reconnect delay', async () => {
+  vi.useFakeTimers();
+  const c = opening();
+  c.connections[0].error('临时网络错误', true);
+  const cancelled = expect(c.joined).rejects.toThrow('已结束');
+  c.voice.stop();
+  await cancelled;
+  await vi.advanceTimersByTimeAsync(35_000);
+  expect(c.connections).toHaveLength(1);
+});
+
+it('surfaces a rejected handshake and does not retry a rate-limited call', async () => {
+  vi.useFakeTimers();
+  const pending = opening();
+  const failure = expect(pending.joined).rejects.toThrow('凭据失效');
+  pending.connections[0].error('凭据失效', false);
+  await failure;
+  const connected = await call();
+  connected.receive({ type: 'error', error: { code: 'rate_limit_exceeded', message: '请求过于频繁' } });
+  await vi.advanceTimersByTimeAsync(35_000);
+  expect(pending.connections).toHaveLength(1);
+  expect(connected.connections).toHaveLength(1);
+  expect(connected.events.at(-1)).toMatchObject({ state: 'error', message: '请求过于频繁' });
+});
+
+it('returns dictated words once, including fillers, without chat, speech or tools', async () => {
+  const c = await call(true, true);
+  try {
+    expect(c.wire[0]).toMatchObject({ type: 'session.create', session: { tools: [] } });
+    expect(c.wire.some(e => e.type === 'conversation.item.create')).toBe(false);
+    c.voice.speak('通知');
+    c.voice.send({ type: 'input_audio_buffer.append', audio: 'AAA=' });
+    c.receive({ type: asr + 'delta', item_id: 'a', delta: '请记' });
+    c.receive({ type: asr + 'text', item_id: 'a', text: '请记下', stash: '这件事。' });
+    c.receive({ type: asr + 'completed', item_id: 'a' });
+    c.receive({ type: asr + 'completed', item_id: 'a', text: '重复的完成事件' });
+    c.receive({ type: 'response.output_text.done', text: '这是回答' });
+    c.receive({ type: 'response.output_audio.delta', audio: 'invalid audio' });
+    c.receive({ type: 'response.function_call_arguments.done', items: [
+      { call_id: 'reject', name: 'spawn_thinking', arguments: '{"objective":"发起任务"}' },
+    ] });
+    c.receive({ type: 'response.done' });
+    c.voice.send({ type: 'input_audio_buffer.append', audio: 'AAA=', localActivity: { started: true, speaking: true } });
+    const result = c.voice.finishDictation();
+    let finished = false;
+    void result.then(() => { finished = true; });
+    expect(c.voice.finishDictation()).toBe(result);
+    expect(c.voice.send({ type: 'input_audio_buffer.append', audio: 'AAA=' })).toBe(false);
+    c.receive({ type: 'input_audio_buffer.committed' });
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    c.receive({ type: asr + 'completed', item_id: 'b', text: '嗯' });
+    await expect(result).resolves.toBe('请记下这件事。\n嗯');
+    expect(c.wire.map(e => e.type)).toEqual(['session.create', 'input_audio_unmute.commit',
+      'input_audio_buffer.append', 'input_audio_buffer.append', 'input_audio_buffer.commit']);
+    expect(c.events.map(e => e.type)).toEqual(['desktop.voice', 'desktop.voice', 'voice.ready']);
+    expect(c.runTool).not.toHaveBeenCalled();
+  } finally { c.voice.stop(); }
+});
+
+it('waits for every dictated item and keeps the order in which speech started', async () => {
+  const c = await call(false, true);
+  try {
+    c.receive({ type: 'input_audio_buffer.speech_started', item_id: 'first' });
+    c.receive({ type: asr + 'started', item_id: 'second' });
+    const result = c.voice.finishDictation();
+    c.receive({ type: asr + 'completed', item_id: 'second', text: '第二句' });
+    c.receive({ type: asr + 'completed', item_id: 'first', text: '第一句' });
+    await expect(result).resolves.toBe('第一句\n第二句');
+  } finally { c.voice.stop(); }
+});
+
+it('keeps waiting when an earlier item finishes after the next speech onset', async () => {
+  const c = await call(false, true);
+  try {
+    c.receive({ type: asr + 'delta', item_id: 'first', delta: '第一句' });
+    c.voice.send({ type: 'input_audio_buffer.append', audio: 'AAA=', localActivity: { started: true, speaking: true } });
+    const result = c.voice.finishDictation();
+    c.receive({ type: asr + 'delta', item_id: 'first', delta: '第一句' });
+    c.receive({ type: asr + 'completed', item_id: 'first' });
+    c.receive({ type: asr + 'completed', item_id: 'last', text: '最后一句' });
+    await expect(result).resolves.toBe('第一句\n最后一句');
+  } finally { c.voice.stop(); }
+});
+
+it('accepts continued text in the same item across a local speech pause', async () => {
+  const c = await call(false, true);
+  try {
+    c.receive({ type: asr + 'delta', item_id: 'one', delta: '请记' });
+    c.voice.send({ type: 'input_audio_buffer.append', audio: 'AAA=', localActivity: { started: true, speaking: true } });
+    const result = c.voice.finishDictation();
+    c.receive({ type: asr + 'delta', item_id: 'one', delta: '请记一下明天的会议' });
+    c.receive({ type: asr + 'completed', item_id: 'one' });
+    await expect(result).resolves.toBe('请记一下明天的会议');
+  } finally { c.voice.stop(); }
+});
+
+it('handles a provider speech onset arriving ahead of Silero', async () => {
+  const c = await call(false, true);
+  try {
+    c.receive({ type: asr + 'started', item_id: 'early' });
+    c.voice.send({ type: 'input_audio_buffer.append', audio: 'AAA=', localActivity: { started: true, speaking: true } });
+    const result = c.voice.finishDictation();
+    c.receive({ type: asr + 'completed', item_id: 'early', text: '完整的一句。' });
+    await expect(result).resolves.toBe('完整的一句。');
+  } finally { c.voice.stop(); }
+});
+
+it('preserves confirmed dictation when local activity never produces another provider item', async () => {
+  vi.useFakeTimers();
+  const c = await call(false, true);
+  try {
+    c.receive({ type: asr + 'completed', item_id: 'confirmed', text: '保留这句话。' });
+    c.voice.send({ type: 'input_audio_buffer.append', audio: 'AAA=', localActivity: { started: true, speaking: true } });
+    const result = c.voice.finishDictation();
+    await vi.advanceTimersByTimeAsync(8_000);
+    await expect(result).resolves.toBe('保留这句话。');
+  } finally { c.voice.stop(); }
+});
+
+it('returns already finalized dictation after silence and reports an empty result', async () => {
+  const c = await call(false, true);
+  try {
+    c.receive({ type: asr + 'completed', item_id: 'a', text: '已经说完。' });
+    c.voice.send({ type: 'input_audio_buffer.append', audio: 'AAA=', localActivity: { started: false, speaking: false } });
+    await expect(c.voice.finishDictation()).resolves.toBe('已经说完。');
+  } finally { c.voice.stop(); }
+  const empty = await call(false, true);
+  try {
+    const result = empty.voice.finishDictation();
+    empty.receive({ type: asr + 'completed', item_id: 'empty', text: '' });
+    await expect(result).rejects.toThrow('没有识别到文字');
+  } finally { empty.voice.stop(); }
+});
+
+it('rejects dictation on timeout, a transcription error, or cancellation', async () => {
+  vi.useFakeTimers();
+  const c = await call(false, true);
+  try {
+    c.receive({ type: asr + 'delta', item_id: 'partial', delta: '未完成' });
+    const timedOut = expect(c.voice.finishDictation()).rejects.toThrow('超时');
+    await vi.advanceTimersByTimeAsync(8_000);
+    await timedOut;
+  } finally { c.voice.stop(); }
+  const failed = await call(false, true);
+  const failure = failed.voice.finishDictation();
+  failed.receive({ type: asr + 'failed', item_id: 'failed' });
+  await expect(failure).rejects.toThrow('语音转写失败');
+  const cancelled = await call(false, true);
+  const cancellation = cancelled.voice.finishDictation();
+  cancelled.voice.stop();
+  await expect(cancellation).rejects.toThrow('取消');
+});
+
+it('discards the disconnected dictation and ignores its late results on the next recording', async () => {
+  vi.useFakeTimers();
+  const c = await call(false, true);
+  try {
+    const stale = c.connections[0];
+    c.receive({ type: asr + 'delta', item_id: 'old', delta: '旧内容' });
+    const result = c.voice.finishDictation();
+    stale.close(1006);
+    await expect(result).rejects.toThrow('断开');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(c.connections).toHaveLength(1);
+    const restarted = c.voice.start();
+    c.connections[1].open();
+    c.receive({ type: 'session.created' });
+    await restarted;
+    const next = c.voice.finishDictation();
+    stale.message(JSON.stringify({ type: asr + 'completed', item_id: 'old', text: '旧内容' }));
+    c.receive({ type: asr + 'completed', item_id: 'new', text: '新内容' });
+    await expect(next).resolves.toBe('新内容');
+  } finally { c.voice.stop(); }
+});
 
 it.each(['换个话题', '停下'])('interrupts the old audio on recognized speech and lets the model handle "%s"', async text => {
   const c = await call();

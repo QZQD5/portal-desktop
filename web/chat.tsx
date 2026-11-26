@@ -30,7 +30,7 @@ function ForegroundChat({ connection, account, ...props }: ComponentProps<typeof
     }).slice(-20);
     return createWebVoice(connection, account, scene, history, () => props.runtime.activeTypedWork?.());
   }, [connection, account, sceneId, sceneLabel, state, props.runtime]);
-  const voice = useVoice(api, sceneId, Boolean(api), sceneId);
+  const voice = useVoice(api, sceneId, Boolean(api), sceneId, state.appendDictation);
   const history = useSyncExternalStore(api?.onEvent ?? inactive, api?.historyRows ?? emptyHistory);
   useEffect(() => () => api?.dispose(), [api]);
   useEffect(() => {

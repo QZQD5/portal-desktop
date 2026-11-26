@@ -208,6 +208,7 @@ export function ChatView({
     return () => clearTimeout(timer);
   }, [state.banner, toastHosted]);
   const { viewport, narrow, nativeTouch } = useChatViewport(mobileWeb);
+  const voice: VoiceState = webVoice?.state || state.voice || { state: 'stopped', muted: false, error: '', transcript: '', task: '' };
   const [editingQueued, setEditingQueued] = useState<{ item: Message; text: string; saving: boolean } | null>(null);
   const openQueueEditor = useRef<Message | null>(null);
   const endQueueEdit = useCallback((message: Message) => {
@@ -217,7 +218,7 @@ export function ChatView({
     setEditingQueued(null);
   }, []);
   function beginQueueEdit(message: Message) {
-    if (openQueueEditor.current || message.setQueuedEditing?.(true) === false) return false;
+    if (voice.dictation || openQueueEditor.current || message.setQueuedEditing?.(true) === false) return false;
     openQueueEditor.current = message;
     setEditingQueued({ item: message, text: message.text, saving: false });
     return true;
@@ -235,7 +236,6 @@ export function ChatView({
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const voice = webVoice?.state || state.voice || { state: 'stopped' as const, muted: false, error: '', transcript: '', task: '' };
   const voiceCommand = webVoice?.command ?? ((action: VoiceAction) => bridge.send({ type: 'beings:voice-action', action }));
   const historyItems = webVoice?.history?.length ? withVoiceHistory(state.items, webVoice.history) : state.items;
   const timelineItems = replyBubbles(sceneItems(withScheduling(voiceMessages(historyItems.filter(item => item.kind !== "message" || !item.queued), voice), state.sceneTasks, state.currentScene), state.historyScope, state.currentScene, state.showSbsMessages));
@@ -360,14 +360,14 @@ export function ChatView({
   const hasDraft = !!state.draft.trim() || state.files.length > 0;
   const readingFiles = state.files.some(file => file.loading);
   const canSteer = state.streaming && state.canInterruptQueue && !state.attachmentPending;
-  const canChooseFollowUp = canSteer && hasDraft && !state.stopping &&
+  const canChooseFollowUp = canSteer && hasDraft && !state.stopping && !voice.dictation &&
     (state.files.length === 0 || location.protocol !== 'beings:');
   const action = state.stopping || (!hasDraft && (state.streaming || state.attachmentPending)) ? 'stop'
     : canChooseFollowUp ? 'steer' : hasDraft && state.sendWillQueue ? 'queue' : 'send';
   const sendLabel = state.stopping ? '正在停止' : action === 'stop' ? '停止处理' : readingFiles ? '正在读取附件'
     : action === 'steer' ? '引导' : action === 'queue' ? '排队' : '发送消息';
   function sendDraft(mode?: "interrupt") {
-    if (state.stopping || readingFiles) return;
+    if (state.stopping || readingFiles || voice.dictation) return;
     if (!parseComposerCommands(state.draft).commands.every(command => canUseComposerCommand(command, state))) return;
     releaseAnchor();
     scrollLock.current = true;
@@ -818,7 +818,7 @@ export function ChatView({
                 <div className="composer-queue" role="list" aria-label={`待发送消息，共 ${visibleQueue.length} 条`}>
                   {visibleQueue.map((item, index) => <QueueRow key={item.id} item={item} index={index}
                     reorderable={sortableIds.includes(item.id)} allowInterrupt={canSteer && !state.stopping}
-                    onEdit={editingQueued ? undefined : beginQueueEdit} />)}
+                    onEdit={editingQueued || voice.dictation ? undefined : beginQueueEdit} />)}
                 </div>
               </SortableContext>
             </DndContext>
@@ -879,8 +879,8 @@ export function ChatView({
                 })}
               </div></ChatTooltipGroup>
             </div>
-            <div id="input-row">
-              {!editingQueued && <ComposerAddMenu state={state} onUpload={() => fileInput.current?.click()} onSelect={() => requestAnimationFrame(() => composer.current?.focus())}
+            <div id="input-row" data-dictating={voice.dictation ? (state.draft ? 'with-draft' : 'empty') : undefined}>
+              {!editingQueued && !voice.dictation && <ComposerAddMenu state={state} onUpload={() => fileInput.current?.click()} onSelect={() => requestAnimationFrame(() => composer.current?.focus())}
                />}
               <ChatComposer
                 state={state}
@@ -890,7 +890,7 @@ export function ChatView({
                 id="input"
                 rows={1}
                 className={state.queued ? "queued" : ""}
-                placeholder="消息"
+                placeholder={voice.dictation ? '' : '消息'}
                 queueEdit={editingQueued ? { text: editingQueued.text, onChange: text =>
                   setEditingQueued(edit => edit?.item === editingQueued.item && !edit.saving ? { ...edit, text } : edit) } : undefined}
                 disabled={editingQueued?.saving}
@@ -939,8 +939,8 @@ export function ChatView({
                   <Icon name={editingQueued.saving ? 'chat-busy' : 'chat-check'} width="18" height="18" />
                 </button>
               </div> :
-                <ComposerSend label={sendLabel} action={action} mobileWeb={mobileWeb}
-                  disabled={state.stopping || (action !== 'stop' && (!hasDraft || readingFiles))} stopping={state.stopping}
+                (!voice.dictation || action === 'stop') && <ComposerSend label={sendLabel} action={action} mobileWeb={mobileWeb}
+                  disabled={state.stopping || (action !== 'stop' && (!hasDraft || readingFiles || !!voice.dictation))} stopping={state.stopping}
                   alternate={canChooseFollowUp ? {
                     label: '排队', shortcut: isMac ? '⌘ ↵' : 'Ctrl ↵', key: isMac ? 'Meta+Enter Control+Enter' : 'Control+Enter',
                     run: () => { sendDraft(); composer.current?.focus(); },

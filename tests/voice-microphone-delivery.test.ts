@@ -38,6 +38,68 @@ async function capture(send: (event: VoiceEvent) => Promise<boolean>) {
   return { ...mic, session, onEvent };
 }
 
+function pendingStartup() {
+  const mic = microphone(vi.fn(async () => true));
+  const warmup = vi.fn(), terminate = vi.fn();
+  let localReady!: () => void;
+  vi.stubGlobal('Worker', class {
+    onmessage!: (event: { data: object }) => void;
+    postMessage = warmup;
+    terminate = terminate;
+    constructor() { localReady = () => this.onmessage({ data: {} }); }
+  });
+  let connected!: () => void, reject!: (error: Error) => void;
+  const start = vi.fn(async () => {
+    await new Promise<void>((resolve, fail) => { connected = resolve; reject = fail; });
+    mic.receive({ type: 'desktop.voice', state: 'ready' });
+  });
+  const api = { ...mic.api, localActivity: true, start };
+  const getMicrophone = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+  const onEvent = vi.fn(), session = new VoiceSession(api, onEvent);
+  return { session, api, warmup, terminate, getMicrophone, onEvent,
+    finishWarmup: () => localReady(), connect: () => connected(), fail: () => reject(new Error('握手失败')) };
+}
+
+it.each(['provider', 'detector'])('starts connection and warmup together when %s becomes ready first', async first => {
+  const f = pendingStartup();
+  const starting = f.session.start();
+  expect(f.api.start).toHaveBeenCalledOnce();
+  expect(f.warmup).toHaveBeenCalledWith({ audio: '', reset: true });
+  const [early, late] = first === 'provider' ? [f.connect, f.finishWarmup] : [f.finishWarmup, f.connect];
+  early();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.getMicrophone).not.toHaveBeenCalled();
+  expect(f.onEvent).not.toHaveBeenCalledWith({ type: 'desktop.voice', state: 'ready' });
+  late();
+  await starting;
+  expect(f.getMicrophone).toHaveBeenCalledOnce();
+  expect(f.onEvent).toHaveBeenCalledWith({ type: 'desktop.voice', state: 'ready' });
+  await f.session.stop();
+});
+
+it('closes the warming detector on connection failure and releases both resources on cancellation', async () => {
+  const f = pendingStartup();
+  const first = f.session.start();
+  f.fail();
+  await expect(first).rejects.toThrow('握手失败');
+  expect(f.terminate).toHaveBeenCalledTimes(1);
+  expect(f.api.stop).toHaveBeenCalledTimes(1);
+  const second = f.session.start();
+  f.connect();
+  await vi.advanceTimersByTimeAsync(0);
+  await f.session.stop();
+  await second;
+  const third = f.session.start();
+  f.finishWarmup();
+  await f.session.stop();
+  f.connect();
+  await third;
+  expect(f.terminate).toHaveBeenCalledTimes(3);
+  expect(f.api.stop).toHaveBeenCalledTimes(3);
+  expect(f.getMicrophone).not.toHaveBeenCalled();
+  expect(f.onEvent).not.toHaveBeenCalledWith({ type: 'desktop.voice', state: 'ready' });
+});
+
 it.each([[0, false], [60, false], [120, false], [120, true]] as const)(
   'preserves microphone PCM with a %i ms IPC delay (every packet: %s)', async (delay, everyPacket) => {
   const delivered: Buffer[] = [];
@@ -77,6 +139,50 @@ it('retries a declined packet together with later PCM, preserving each sample on
   await vi.advanceTimersByTimeAsync(40);
   expect(accepted).toEqual([...Array(640).fill(8191), ...Array(640).fill(16383)]);
   await mic.session.stop();
+});
+
+it('delivers the last microphone samples before finishing dictation and discards subsequent input', async () => {
+  const audio: Buffer[] = [];
+  const mic = microphone(async event => {
+    await new Promise(resolve => setTimeout(resolve, 60));
+    audio.push(Buffer.from(String(event.audio), 'base64'));
+    return true;
+  });
+  const api = { ...mic.api, finishDictation: vi.fn(async () => '记在草稿里') };
+  const session = new VoiceSession(api, () => {}, 'scene', 'dictation');
+  await session.start();
+  await vi.advanceTimersByTimeAsync(0);
+  for (let i = 0; i < 6; i++) mic.frame(0.25);
+  const done = session.finishDictation();
+  mic.frame(0.5);
+  expect(api.finishDictation).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(140);
+  await expect(done).resolves.toBe('记在草稿里');
+  expect(audio.map(packet => packet.length / 2)).toEqual([640, 640]);
+  expect(audio[1].readInt16LE(127 * 2)).toBe(8191);
+  expect(audio[1].subarray(128 * 2).every(value => value === 0)).toBe(true);
+  await session.stop();
+});
+
+it('discards a late dictation result after cancelling the recording', async () => {
+  const mic = microphone(async () => true);
+  let resolve!: (value: string) => void;
+  const api = { ...mic.api, finishDictation: vi.fn(() => new Promise<string>(done => { resolve = done; })) };
+  const dictated = vi.fn();
+  let command!: (action: VoiceAction) => void;
+  function VoiceControls() { command = useVoice(api, 'fixture', true, 'scene', dictated).command; return null; }
+  renderToStaticMarkup(createElement(VoiceControls));
+  command('dictate');
+  await vi.advanceTimersByTimeAsync(0);
+  command('finish-dictation');
+  command('finish-dictation');
+  await vi.advanceTimersByTimeAsync(0);
+  expect(api.finishDictation).toHaveBeenCalledTimes(1);
+  command('stop');
+  resolve('这句已取消');
+  await vi.advanceTimersByTimeAsync(0);
+  expect(dictated).not.toHaveBeenCalled();
+  expect(api.stop).toHaveBeenCalledTimes(1);
 });
 
 it.each(['mute', 'disconnect'])('discards queued audio across %s including a pending refusal', async boundary => {

@@ -44,7 +44,7 @@ export function installVoiceProxy(server, upstream = endpoint) {
           provider.terminate();
         });
         provider.on("error", () => client.close(1011, "Voice upstream connection failed"));
-        provider.on("close", code => client.close(code === 1008 ? 1008 : 1000, "Voice upstream closed"));
+        provider.on("close", code => client.close(code === 1005 || code === 1006 ? 1011 : code, "Voice upstream closed"));
         for (const [from, to] of [[client, provider], [provider, client]]) {
           from.on("message", (payload, isBinary) => {
             if (isBinary || to.readyState !== WebSocket.OPEN) {

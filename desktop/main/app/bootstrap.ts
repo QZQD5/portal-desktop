@@ -188,6 +188,7 @@ export function createDesktopApplication(options: DesktopOptions) {
     registerLocalProtocol(assets, proxy, plugins, attachmentDownloads, localFiles, dshPlugins, connectorNetwork, subagentNetwork, shellURL);
     voice = new VoiceGateway({
       directory, resources: app.isPackaged ? process.resourcesPath : path.resolve('resources'), packaged: app.isPackaged,
+      logConnection: (event, elapsedMs, code) => errorLog.info('voice-connect', JSON.stringify({ event, elapsedMs, code })),
       scenes: () => chatSessions?.list(store.connection?.endpoint) || [],
       binding: () => {
         const scene = chat.currentScene();
@@ -222,7 +223,11 @@ export function createDesktopApplication(options: DesktopOptions) {
       window: () => lifecycle.window, shellURL, isQuitting: () => lifecycle.quitting,
       recoveryBlocked: () => portalController.recoveryBlocked, errorLog
     });
-    handle('beings:voice-start', () => voice!.start());
+    handle('beings:voice-start', (mode?: unknown) => {
+      if (mode !== undefined && mode !== 'dictation') throw new Error('未知的语音模式。');
+      return voice!.start(mode);
+    });
+    handle('beings:voice-finish-dictation', () => voice!.finishDictation());
     handle('beings:voice-stop', () => voice!.disconnect());
     handle('beings:voice-send', (event: import('../../shared/voice').VoiceEvent) => voice!.send(event));
     const desktopHome = await createDesktopHome({ directory, assets, secretStorage, store, window: () => lifecycle.window, handle, network: connectorNetwork,

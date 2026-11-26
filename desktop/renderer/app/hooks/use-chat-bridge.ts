@@ -12,9 +12,17 @@ export function useChatBridge(
   app: AppModel,
   frame: RefObject<HTMLIFrameElement | null>,
 ) {
-  const voice = useVoice(app.api.voice, `${app.snapshot?.settings.endpoint}:${app.snapshot?.chatScene?.scene_id}`, Boolean(app.snapshot?.settings.endpoint && app.snapshot?.chatScene?.scene_id), app.snapshot?.chatScene?.scene_id);
-  const voiceState = useRef(voice.state);
-  voiceState.current = voice.state;
+  const dictationRevision = useRef<string | null>(null);
+  const endpoint = app.snapshot?.settings.endpoint;
+  const sceneId = app.snapshot?.chatScene?.scene_id;
+  const voice = useVoice(app.api.voice, `${endpoint}:${sceneId}`, Boolean(endpoint && sceneId), sceneId,
+    (text, recordedSceneId) => {
+      const revision = dictationRevision.current;
+      dictationRevision.current = null;
+      if (revision !== null) app.post({ type: 'beings:dictation-result', revision, text, sceneId: recordedSceneId });
+    });
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
   useEffect(() => {
     app.post({ type: 'beings:voice-state', state: voice.state,
       revision: new URL(frame.current?.src || 'https://invalid').searchParams.get('revision') });
@@ -122,11 +130,15 @@ export function useChatBridge(
         return;
       }
       if (message.type === 'beings:voice-state-request') {
-        app.post({ type: 'beings:voice-state', state: voiceState.current, revision: message.revision });
+        app.post({ type: 'beings:voice-state', state: voiceRef.current.state, revision: message.revision });
         return;
       }
       if (message.type === 'beings:voice-action') {
-        if (VOICE_ACTIONS.includes(message.action) && !document.querySelector('dialog[open]')) voice.command(message.action as VoiceAction);
+        if (VOICE_ACTIONS.includes(message.action) && !document.querySelector('dialog[open]')) {
+          if (message.action === 'dictate') dictationRevision.current = message.revision;
+          if (message.action === 'stop') dictationRevision.current = null;
+          voiceRef.current.command(message.action as VoiceAction);
+        }
         return;
       }
       if (message.type === 'beings:appearance-request') {

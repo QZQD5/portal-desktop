@@ -140,6 +140,11 @@ export function createChatBridge(state: ChatState) {
         return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
+      if (data.type === 'beings:dictation-result') {
+        if (data.revision === revision && typeof data.text === 'string' && typeof data.sceneId === 'string')
+          state.appendDictation(data.text, data.sceneId);
+        return;
+      }
       if (data.type === 'beings:voice-state') {
         if (data.revision !== revision || (data.state !== null && !isVoiceState(data.state))) return;
         state.voice = data.state;
@@ -347,6 +352,7 @@ export function createChatBridge(state: ChatState) {
     };
     void refreshSbs();
     publishActivity();
+    send({ type: 'beings:voice-state-request' });
     send({ type: 'beings:appearance-request' });
     send({ type: 'beings:scene-tasks-request' });
     send({ type: 'beings:permission-state-request' });

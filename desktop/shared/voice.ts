@@ -1,5 +1,13 @@
 export type VoiceEvent = { type: string; [key: string]: unknown };
-export const VOICE_ACTIONS = ['start', 'stop', 'mute', 'interrupt'] as const;
+export function voiceHandshakeFailure(status: number): [message: string, retryable: boolean] {
+  if (status === 401 || status === 403)
+    return [`语音服务拒绝了当前 Being 凭据（HTTP ${status}），请检查连接设置。`, false];
+  if (status === 429) return ['语音服务已限流（HTTP 429），请稍后重试。', false];
+  if ([408, 500, 502, 503, 504].includes(status))
+    return [`语音网关暂时不可用（HTTP ${status}），请稍后重试。`, true];
+  return [`语音连接请求未获接受（HTTP ${status}）。`, false];
+}
+export const VOICE_ACTIONS = ['start', 'stop', 'mute', 'interrupt', 'dictate', 'finish-dictation'] as const;
 export type VoiceAction = typeof VOICE_ACTIONS[number];
 export interface VoiceWorkEntry {
   type: 'think' | 'tool' | 'tool-result';
@@ -53,6 +61,8 @@ export interface VoicePresentation {
 export interface VoiceState {
   state: 'stopped' | 'connecting' | 'ready' | 'error';
   muted: boolean;
+  dictation?: 'recording' | 'finishing';
+  dictationAvailable?: boolean;
   microphone?: 'starting' | 'ready' | 'recovering' | 'unavailable';
   inputLevel?: number;
   error: string;
@@ -66,6 +76,8 @@ export function isVoiceState(value: unknown): value is VoiceState {
   if (!value || typeof value !== 'object') return false;
   const data = value as VoiceState;
   return ['stopped', 'connecting', 'ready', 'error'].includes(data.state) && typeof data.muted === 'boolean' &&
+    (data.dictation === undefined || ['recording', 'finishing'].includes(data.dictation)) &&
+    (data.dictationAvailable === undefined || typeof data.dictationAvailable === 'boolean') &&
     (data.microphone === undefined || ['starting', 'ready', 'recovering', 'unavailable'].includes(data.microphone)) &&
     (data.inputLevel === undefined || (Number.isFinite(data.inputLevel) && data.inputLevel >= 0 && data.inputLevel <= 1)) &&
     [data.error, data.transcript, data.task].every(text => typeof text === 'string' && text.length <= 6000) &&
@@ -80,7 +92,8 @@ export function isVoiceState(value: unknown): value is VoiceState {
 }
 export interface VoiceAPI {
   localActivity?: boolean;
-  start(): Promise<void>;
+  start(mode?: 'dictation'): Promise<void>;
+  finishDictation?(): Promise<string>;
   stop(): Promise<void>;
   send(event: VoiceEvent): Promise<boolean>;
   onEvent(callback: (event: VoiceEvent) => void): () => void;

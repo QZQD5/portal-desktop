@@ -4,7 +4,7 @@ import type { VoiceEvent } from './voice';
 export interface VoiceWireHandlers {
   open(): void;
   message(text: string): void;
-  error(message?: string): void;
+  error(message?: string, retryable?: boolean): void;
   close(code?: number): void;
 }
 export interface VoiceWireSocket {
@@ -34,8 +34,9 @@ export interface RealtimeVoiceOptions {
   /** Return the socket first, then deliver open/message/close in wire order. */
   connect(handlers: VoiceWireHandlers): VoiceWireSocket;
   emit(event: VoiceEvent): void;
-  tools: readonly VoiceTool[];
-  runTool(call: VoiceToolCall): Promise<unknown>;
+  tools?: readonly VoiceTool[];
+  runTool?(call: VoiceToolCall): Promise<unknown>;
+  dictation?: boolean;
   history?(): readonly HistoryMessage[] | Promise<readonly HistoryMessage[]>;
   instructions?: string;
   context?(): Record<string, unknown>;
@@ -69,6 +70,8 @@ interface Reply {
 type LocalActivity = { started: boolean; speaking: boolean; barge: boolean; quietFrames: number };
 
 const speechPrefix = 'conversation.item.input_audio_transcription.';
+const handshakeTimeout = 35_000;
+const reconnectDelay = 500;
 declare const PORTAL_VOICE_INSTRUCTIONS: string | undefined;
 const defaultPrompt =
   typeof PORTAL_VOICE_INSTRUCTIONS === 'string'
@@ -107,6 +110,7 @@ export class RealtimeVoice {
   private joined = false;
   private muted = false;
   private retries = 0;
+  private startDeadline = 0;
   private starting?: Promise<void>;
   private resolveStart?: () => void;
   private rejectStart?: (error: Error) => void;
@@ -131,6 +135,13 @@ export class RealtimeVoice {
   private waitForTurn = false;
   private requireResponseStart = false;
   private responsePending = false;
+  private dictation?: {
+    segments: Map<string, Turn>;
+    // Silero may notice a pause inside one ASR item, or the beginning of a new item.
+    pendingAudio?: 'speech' | 'unknown';
+    completion?: Promise<string>;
+    finish?: (error?: string) => void;
+  };
 
   constructor(private options: RealtimeVoiceOptions) {}
 
@@ -144,6 +155,8 @@ export class RealtimeVoice {
     this.starting = pending;
     if (!this.running) {
       this.running = true;
+      this.startDeadline = Date.now() + handshakeTimeout;
+      if (this.options.dictation) this.dictation = { segments: new Map() };
       this.options.emit({ type: 'desktop.voice', state: 'connecting' });
       this.open();
     }
@@ -151,24 +164,26 @@ export class RealtimeVoice {
   }
 
   private open() {
+    const timeout = this.joined ? handshakeTimeout : this.startDeadline - Date.now();
+    if (timeout <= 0) {
+      this.lost('语音服务连接超时。');
+      return;
+    }
     const epoch = ++this.epoch;
     const handlers: VoiceWireHandlers = {
       open: () => {
         if (epoch !== this.epoch) return;
-        const { locale, timeZone } = Intl.DateTimeFormat().resolvedOptions();
-        const context = JSON.stringify({ locale, time_zone: timeZone, ...this.options.context?.() }).replace(
-          /</g,
-          '\\u003c',
-        );
+        let instructions = '用户正在口述输入，请保持安静。';
+        if (!this.dictation) {
+          const { locale, timeZone } = Intl.DateTimeFormat().resolvedOptions();
+          const context = JSON.stringify({ locale, time_zone: timeZone, ...this.options.context?.() }).replace(/</g, '\\u003c');
+          instructions = (this.options.instructions || defaultPrompt) + '\n<runtime_context>' + context + '</runtime_context>';
+        }
         this.write({
           type: 'session.create',
           session: {
             model: '1.2.6.1',
-            instructions:
-              (this.options.instructions || defaultPrompt) +
-              '\n<runtime_context>' +
-              context +
-              '</runtime_context>',
+            instructions,
             audio: {
               input: { format: { type: 'pcm', rate: 16000 } },
               output: {
@@ -178,7 +193,7 @@ export class RealtimeVoice {
                 loudness: 0,
               },
             },
-            tools: this.options.tools.map(tool => ({ ...tool, type: 'function' })),
+            tools: this.dictation ? [] : (this.options.tools || []).map(tool => ({ ...tool, type: 'function' })),
           },
         });
       },
@@ -196,22 +211,20 @@ export class RealtimeVoice {
           this.lost('语音数据格式错误，请重新连接。');
         }
       },
-      error: message => {
-        if (epoch === this.epoch) this.lost(message || '无法连接语音服务。');
+      error: (message, retryable) => {
+        if (epoch === this.epoch) this.lost(message || '无法连接语音服务。', retryable);
       },
       close: code => {
-        if (epoch === this.epoch)
-          this.lost(
-            code === 1008 ? '语音服务拒绝连接，请检查 Being 凭据。' : '语音连接已断开。',
-            code === 1008,
-          );
+        if (epoch !== this.epoch) return;
+        if (code === 1008) this.lost('语音服务拒绝连接，请检查 Being 凭据。', false);
+        else this.lost('语音连接已断开。', this.joined || [1001, 1006, 1011, 1012].includes(code ?? 0));
       },
     };
-    this.timer = setTimeout(() => this.lost('语音服务连接超时。'), 35_000);
+    this.timer = setTimeout(() => this.lost('语音服务连接超时。'), timeout);
     try {
       this.socket = this.options.connect(handlers);
     } catch (error) {
-      this.lost(error instanceof Error ? error.message : '无法连接语音服务。', true);
+      this.lost(error instanceof Error ? error.message : '无法连接语音服务。', false);
     }
   }
 
@@ -229,7 +242,7 @@ export class RealtimeVoice {
   private async connected() {
     const epoch = this.epoch;
     if (this.ready) return;
-    const history = await this.options.history?.();
+    const history = this.dictation ? undefined : await this.options.history?.();
     if (epoch !== this.epoch || this.ready) return;
     const items: { id: string; type: string; role: string; content: { type: string; text: string }[] }[] = [];
     let user: HistoryMessage | undefined;
@@ -294,10 +307,14 @@ export class RealtimeVoice {
     this.lastSpeechAt = 0;
   }
 
-  private lost(message: string, fatal = false) {
+  private lost(message: string, retryable = this.joined) {
+    this.dictation?.finish?.(message);
     this.dropSocket('disconnected');
     if (!this.running) return;
-    if (!this.joined || fatal) {
+    const canReconnect = this.joined
+      ? !this.dictation
+      : this.retries === 0 && Date.now() + reconnectDelay < this.startDeadline;
+    if (!retryable || !canReconnect) {
       this.running = this.joined = false;
       this.resetCall();
       this.rejectStart?.(new Error(message));
@@ -305,12 +322,13 @@ export class RealtimeVoice {
       this.options.emit({ type: 'desktop.voice', state: 'error', message });
       return;
     }
-    this.options.emit({ type: 'desktop.voice', state: 'connecting' });
-    this.timer = setTimeout(() => this.open(), Math.min(8_000, 500 * 2 ** this.retries++));
+    if (this.joined) this.options.emit({ type: 'desktop.voice', state: 'connecting' });
+    this.timer = setTimeout(() => this.open(), Math.min(8_000, reconnectDelay * 2 ** this.retries++));
   }
 
   stop() {
     const active = this.running;
+    this.dictation?.finish?.('已取消语音输入。');
     this.running = this.joined = false;
     if (this.ready) this.write({ type: 'session.close' });
     this.dropSocket('call_ended');
@@ -327,10 +345,38 @@ export class RealtimeVoice {
     this.finished.clear();
     this.muted = false;
     this.retries = 0;
+    this.dictation = undefined;
+  }
+
+  finishDictation(): Promise<string> {
+    const draft = this.dictation;
+    if (!draft || !this.ready) return Promise.reject(new Error('语音输入未连接。'));
+    if (draft.completion) return draft.completion;
+    draft.completion = new Promise<string>((resolve, reject) => {
+      draft.finish = error => {
+        clearTimeout(this.asrTimer);
+        draft.finish = undefined;
+        const text = [...draft.segments.values()].map(turn => turn.text).filter(Boolean).join('\n');
+        if (error || !text) reject(new Error(error || '没有识别到文字。'));
+        else resolve(text);
+      };
+    });
+    // A commit acknowledgement alone does not contain the last utterance.
+    this.asrTimer = setTimeout(() => {
+      const waitingForAsr = [...draft.segments.values()].some(turn => !turn.final) ||
+        (!draft.segments.size && !!draft.pendingAudio);
+      draft.finish?.(waitingForAsr ? '语音转写等待超时，请重新录入。' : undefined);
+    }, 8_000);
+    if (this.write({ type: 'input_audio_buffer.commit' }) && !draft.pendingAudio &&
+        draft.segments.size && [...draft.segments.values()].every(turn => turn.final)) {
+      draft.finish?.();
+    }
+    return draft.completion;
   }
 
   send(event: VoiceEvent): boolean {
     if (!this.running) return false;
+    if (this.dictation && event.type !== 'input_audio_buffer.append') return false;
     switch (event.type) {
       case 'input.mute':
       case 'input.unmute':
@@ -366,6 +412,7 @@ export class RealtimeVoice {
         return true;
       }
       case 'input_audio_buffer.append': {
+        if (this.dictation?.completion) return false;
         if (typeof event.audio !== 'string' || event.audio.length > 64 * 1024) return false;
         if (this.muted) return true;
         if (!this.ready) {
@@ -378,7 +425,10 @@ export class RealtimeVoice {
         }
         if (this.socket!.bufferedAmount > 64 * 1024) return false;
         const activity = event.localActivity as LocalActivity | undefined;
-        if (activity) {
+        if (this.dictation) {
+          if (!activity) this.dictation.pendingAudio = 'unknown';
+          else if (activity.started) this.dictation.pendingAudio = 'speech';
+        } else if (activity) {
           if (activity.speaking) this.lastSpeechAt = Date.now();
           if (!activity.speaking) this.barged = false;
           const playing = !!this.requested || !!this.active || this.playing.size > 0;
@@ -469,7 +519,7 @@ export class RealtimeVoice {
   }
 
   speak(text: string, taskIds: string[] = [], origin: Announcement['origin'] = 'announcement') {
-    if (!this.running || !text.trim()) return;
+    if (!this.running || this.dictation || !text.trim()) return;
     this.announcements.push({ text: text.trim(), taskIds, origin });
     this.playNext();
   }
@@ -523,19 +573,19 @@ export class RealtimeVoice {
       return;
     }
     if (kind === 'error') {
-      const detail = event.error as { message?: string } | undefined;
+      const detail = event.error as { message?: string; code?: string | number } | undefined;
       const message = stringValue(detail?.message || event.message).slice(0, 500) || '上游语音服务报错。';
       if (/no active response|no response.*cancel/i.test(message)) return;
       const fatal =
-        /invalid.*api.*key|authentication|unauthorized|forbidden|\b(?:401|403)\b|quota|arrearage/i.test(
-          message,
+        /invalid.*api.*key|authentication|unauthorized|forbidden|\b(?:401|403|429)\b|quota|arrearage|rate[\s_-]*limit|too many requests/i.test(
+          (detail?.code ?? '') + ' ' + message,
         );
       if (
-        !this.ready ||
+        this.dictation || !this.ready ||
         fatal ||
         /no session active|no active session|timeout|idle|inactivity|no response was generated/i.test(message)
       ) {
-        this.lost(message, fatal);
+        this.lost(message, !fatal && this.joined);
       } else this.options.emit({ type: 'error', message });
       return;
     }
@@ -543,7 +593,7 @@ export class RealtimeVoice {
       this.transcription(kind, event);
       return;
     }
-    if (!kind.startsWith('response.')) return;
+    if (this.dictation || !kind.startsWith('response.')) return;
     const response = event.response as { id?: string; usage?: unknown; status?: string } | undefined;
     if (kind === 'response.done' && response?.usage) return;
     const wireId = stringValue(event.response_id || response?.id);
@@ -682,10 +732,15 @@ export class RealtimeVoice {
       this.turn = turn;
     }
     if (turn.final) return;
-    turn.targets ??= this.options.captureTargets?.();
+    const draft = this.dictation;
+    if (draft && !draft.segments.has(turn.id)) {
+      draft.segments.set(turn.id, turn);
+      draft.pendingAudio = undefined;
+    }
+    if (!draft) turn.targets ??= this.options.captureTargets?.();
     const base = { role: 'user', turnId: turn.id, itemId: itemId || turn.id };
     if (kind.endsWith('started')) {
-      this.watchTranscription();
+      if (!draft) this.watchTranscription();
       return;
     }
     const partial = kind.endsWith('.delta') || kind.endsWith('.text');
@@ -694,6 +749,22 @@ export class RealtimeVoice {
       stringValue(event.delta || event.text || event.transcript) + stringValue(event.stash)
     ).trim();
     const text = kind.endsWith('.failed') ? '' : transcript || (partial ? '' : turn.text);
+    if (draft) {
+      // New text for this item can account for a local onset. A repeated snapshot or a bare
+      // completion can still belong to the previous sentence while the next item is in flight.
+      if (turn === this.turn && text && text !== turn.text) draft.pendingAudio = undefined;
+      turn.text = text;
+      turn.final = !partial;
+      if (kind.endsWith('.failed')) {
+        this.lost('语音转写失败，请重新录入。');
+      } else if (turn.final) {
+        if (turn === this.turn && draft.pendingAudio === 'unknown') draft.pendingAudio = undefined;
+        if (draft.finish && !draft.pendingAudio && [...draft.segments.values()].every(segment => segment.final)) {
+          draft.finish();
+        }
+      }
+      return;
+    }
     const meaningful = text && !/^[嗯唔呃啊哦额\s。，、！？.!?]+$/u.test(text);
     // ASR has already interrupted the provider. Clear the previous output locally, including
     // a TTS submission that has not received its first response packet.
@@ -772,7 +843,8 @@ export class RealtimeVoice {
     let result: unknown;
     let failed = false;
     try {
-      if (!this.options.tools.some(tool => tool.name === name)) throw new Error('此语音会话未启用该工具。');
+      if (!this.options.runTool || !this.options.tools?.some(tool => tool.name === name))
+        throw new Error('此语音会话未启用该工具。');
       const args = typeof item.arguments === 'string' ? JSON.parse(item.arguments) : item.arguments || {};
       if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('语音工具参数无效。');
       const mutates =
