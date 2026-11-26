@@ -43,6 +43,7 @@ export interface Message extends MessageScene {
   historySeq?: number;
   voiceKey?: string;
   voicePending?: boolean;
+  historyContentError?: boolean;
   persistedFrom?: "final" | "act_talk" | "partial";
   persistedStreamId?: string;
   /** Authoritative history content, applied after live rendering finishes. */
@@ -56,12 +57,18 @@ export interface Message extends MessageScene {
   retryLabel?: string;
   notice?: 'stop';
   statusRunId?: string;
+  /** Message whose bubble owns this feedback. Without one, the notice stays in the timeline. */
+  statusMessageId?: string;
   queued?: boolean;
+  queuePhase?: 'queued' | 'preparing' | 'sending' | 'failed';
+  queueBusy?: boolean;
+  queueNoticeTone?: 'neutral' | 'error';
   queueNotice?: string;
   cancelQueued?: () => void;
   canInterruptQueued?: boolean;
   interruptQueued?: () => void | Promise<void>;
-  editQueued?: (text: string) => void | Promise<void>;
+  setQueuedEditing?: (editing: boolean) => boolean;
+  editQueued?: (text: string) => boolean | Promise<boolean>;
   moveQueued?: (offset: number) => void | Promise<void>;
   reorderQueued?: (targetId: string) => void | Promise<void>;
 }
@@ -77,6 +84,7 @@ export interface ActivityEntry {
   result?: string;
   inputDetail?: string;
   resultDetail?: string;
+  nextAction?: string;
   exitCode?: number;
   durationMs?: number;
   outputTruncated?: boolean;
@@ -101,16 +109,17 @@ export interface Run extends MessageScene {
   context?: string;
   arg: string;
   waitingForReply?: boolean;
+  /** A final reply was observed, independently of the display label. */
+  replyConfirmed?: boolean;
   status?: import("../../../shared/types").ChatSceneActivity;
   scheduling?: { hint: string; tasks: import("../../../shared/types").SceneTask[] };
-  synthetic?: boolean;
   stopHistorySeq?: number;
   outcome?: "stopped" | "error" | "timeout" | "done";
 }
 export type ChatItem =
   | Message
   | Run
-  | ({ kind: "separator"; id: string; text: string; marker?: boolean; handoffMarker?: boolean; stopMarker?: boolean } & MessageScene);
+  | ({ kind: "separator"; id: string; text: string; historySeq?: number; marker?: boolean; handoffMarker?: boolean; stopMarker?: boolean } & MessageScene);
 export interface Preset {
   base_url?: string;
   api?: string;
@@ -154,6 +163,7 @@ export interface Soul {
 export class ChatState extends Store {
   historyLoading = true;
   historyRefreshing = false;
+  historyLoadFailed = false;
   intelligentUISnapshots: Record<string, string> = {};
   private uiSnapshotStore = new UISnapshotStore();
   recordIntelligentUISnapshot(scene: string, text: string, active = false) {
@@ -224,6 +234,7 @@ export class ChatState extends Store {
   attachmentPending = false;
   connection = "connecting";
   banner = "";
+  toastHosted = false;
   dotClass = "reconnecting";
   sbsEnabled = true;
   sbsKnown = false;
@@ -250,7 +261,7 @@ export interface ChatRuntime {
   loadSbsState(): Promise<boolean | undefined>;
   revealHistory(rows: import("../services/history-cache").HistoryMessage[]): void;
   loadOlderHistory(before?: number): Promise<number>;
-  loadHistoryTarget(seq: number, sceneId: string): Promise<boolean>;
+  loadHistoryTarget(seq: number, sceneId: string, refresh?: boolean): Promise<boolean>;
   refreshHistory(): Promise<void>;
   refreshOnRegainedAttention(): Promise<void>;
   request(path: string, init?: RequestInit): Promise<Response>;

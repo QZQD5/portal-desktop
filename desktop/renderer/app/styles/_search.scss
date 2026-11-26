@@ -6,9 +6,13 @@
   max-height: calc(100dvh - 48px);
 }
 
+#chat-search-panel::backdrop {
+  background: transparent;
+}
+
 .chat-search-field {
   padding: 8px 10px 18px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--text);
   gap: 14px;
 }
 

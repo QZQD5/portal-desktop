@@ -2,12 +2,14 @@ import { WorkspaceDrawer, DrawerPresence } from "../shared/components/workspace-
 import { HomeFileViewer } from './components/home-file-viewer';
 import { IconButton } from '../shared/components/icon-button';
 import { Icon } from '../shared/icons/icon';
+import { Toast } from '../shared/components/toast';
 import { DshPluginSurfaces } from '../plugins/dsh/page';
 import {AttachmentFileViewer} from './components/attachment-file-viewer';
 import {AttachmentImageViewer} from './components/attachment-image-viewer';
 import { useEffect, useLayoutEffect, useRef } from "react";
 import type { AppModel } from "./models/app";
 import { useModel } from "../shared/hooks/use-model";
+import { usePointerFocus } from '../shared/hooks/use-pointer-focus';
 import { presentColorScheme, renderedColorScheme } from '../shared/color-scheme';
 import { useChatBridge } from "./hooks/use-chat-bridge";
 import { WorkspaceNavigation, BeingInfo } from "./components/workspace-navigation";
@@ -21,9 +23,11 @@ import { Town } from "../town/page";
 import { TownAuth } from "../town/components/auth";
 import { TownComposer } from "../town/components/composer";
 import { KitInstall } from "../town/components/kit-install";
+import { KitDelete } from "../town/components/kit-delete";
 import { ChatSearch } from "./components/search";
 import { ConnectionSettings, ClientSettings } from "./components/settings";
 import { SubagentModelSettings } from "./components/subagent-model-settings";
+import { SubagentTasks } from "./components/subagent-tasks";
 import { Diagnostics } from "./components/diagnostics";
 import { PermissionSettings, ToolApprovalDialog } from './components/permissions';
 import { EditContextMenu } from "../shared/components/context-menu";
@@ -36,8 +40,16 @@ export function App({ model }: { model: AppModel }) {
     frame = useRef<HTMLIFrameElement>(null);
   const chatPanel = useRef<HTMLElement>(null);
   const [chatWidth, setChatWidth] = usePanelWidth("chat", 640);
+  usePointerFocus();
   useChatBridge(app, frame);
   useEffect(() => app.start(), [app]);
+  const previousStartupNotice = useRef('');
+  useEffect(() => {
+    const notice = app.snapshot?.notice || '';
+    if (notice) app.toast(notice);
+    else if (previousStartupNotice.current && app.toastMessage === previousStartupNotice.current) app.toast('');
+    previousStartupNotice.current = notice;
+  }, [app, app.snapshot?.notice]);
   useLayoutEffect(() => {
     presentColorScheme(renderedColorScheme(app.theme));
   }, [app.theme]);
@@ -121,20 +133,13 @@ export function App({ model }: { model: AppModel }) {
       </section>
       <main id="client-main" hidden={app.startup !== "ready"}>
         <div className="workspace-body">
+          {app.api.platform === 'darwin' && <div className="workspace-window-drag" aria-hidden="true" />}
           <WorkspaceNavigation app={app} />
           <div className="workspace-stage">
             <div className={`workspace-content${app.view !== "chat" && app.chatSplitOpen ? " split-chat" : ""}`}>
             <WorkspaceDrawer as="section" fluid ref={chatPanel} id="chat-view" className="view" open={app.view === "chat" || app.chatSplitOpen}
               style={{ "--chat-pane-width": `${chatWidth}px` } as import("react").CSSProperties}>
               <Topbar model={app} />
-              <p
-                id="startup-notice"
-                className="startup-notice"
-                role="status"
-                hidden={!app.snapshot?.notice}
-              >
-                {app.snapshot?.notice || ""}
-              </p>
               <SceneRibbon model={app.workspace} />
               <PanelResizeHandle panel={chatPanel} label="调整并排对话宽度" edge="right" width={chatWidth} onResize={setChatWidth} initial={640} min={300} max={1000} disabled={app.view === "chat" || !app.chatSplitOpen} />
               <div
@@ -151,7 +156,7 @@ export function App({ model }: { model: AppModel }) {
                   />
                   <img className="welcome-logo town-logo-dark" src={logoWhite} alt="Portal Desktop" width={88} height={88} />
                   <h1>从一个想法开始</h1>
-                  <p>连接你的 Being，继续对话。</p>
+                  <p>连接你的 Being，在同一个工作台里对话、读资料、逛小镇。</p>
                 </div>
                 <button
                   className="welcome-connect"
@@ -159,9 +164,7 @@ export function App({ model }: { model: AppModel }) {
                   onClick={() => app.showSettings()}
                 >
                   <span>连接我的 Being</span>
-                  <span className="welcome-connect-arrow" aria-hidden="true">
-                    ↗
-                  </span>
+                  <Icon name="arrow-up-right-16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" />
                 </button>
               </div>
               <iframe
@@ -182,6 +185,7 @@ export function App({ model }: { model: AppModel }) {
             </WorkspaceDrawer>}</DrawerPresence>
             </div>
           </div>
+          <SubagentTasks app={app} />
           <AttachmentFileViewer scope={`${app.chatSource}:${app.snapshot?.chatScene?.scene_id || ''}`} frame={frame}>
             <BeingInfo app={app} />
           </AttachmentFileViewer>
@@ -198,15 +202,15 @@ export function App({ model }: { model: AppModel }) {
       <ClientSettings model={app} />
       {!app.settingsRoute && <ConnectionSettings model={app} />}
       <KitInstall model={app.town} />
+      <KitDelete model={app.town} />
       <PermissionSettings app={app}/>
       <ToolApprovalDialog app={app}/>
-      <Toast message={app.toastMessage} />
+      <Toast message={app.toastMessage} copied={app.toastCopied} />
       <EditContextMenu edit={app.api.editSelection} rootSelector="#client-main, dialog[open]"
         selectionSelector=".reading-text, .dialog-body pre" />
     </HomeFileViewer>
   );
 }
-
 // Keep the rendered destination stable while its drawer exits. The model can
 // stop background work immediately without replacing the departing page.
 function PlaceContent({ app, view }: { app: AppModel; view: string }) {
@@ -241,24 +245,5 @@ function PlaceContent({ app, view }: { app: AppModel; view: string }) {
         <PluginSidebar model={app.plugins} theme={app.colorScheme} contextKey={`${app.chatSource}:${JSON.stringify(app.snapshot?.chatScene)}:${app.town.live?.generation}`} />
       </div>}
     </>
-  );
-}
-
-function Toast({ message }: { message: string }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    const toast = ref.current;
-    if (!toast) return;
-    if (message) {
-      if (typeof toast.showPopover === "function" && !toast.matches(":popover-open"))
-        toast.showPopover();
-    } else if (typeof toast.hidePopover === "function" && toast.matches(":popover-open")) {
-      toast.hidePopover();
-    }
-  }, [message]);
-  return (
-    <div ref={ref} id="toast" popover="manual" role="status" aria-live="polite">
-      {message}
-    </div>
   );
 }

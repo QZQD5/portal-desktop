@@ -60,6 +60,22 @@
   pointer-events: auto;
 }
 
+[data-message-actions] .button {
+  opacity: 1;
+  pointer-events: inherit;
+
+  svg {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+:global(html[data-chat-host='desktop']) [data-message-actions] .chat svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.95;
+}
+
 @media (hover: none) {
   .button {
     opacity: 1;

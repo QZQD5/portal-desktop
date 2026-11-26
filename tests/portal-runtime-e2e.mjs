@@ -70,7 +70,7 @@ try {
   assert.equal(defaults.allowExec, true); assert.equal(defaults.kitsEnabled, true);
   await page.evaluate(async input => {
     const { settings } = await window.beings.snapshot();
-    await window.beings.save({ ...settings, ...input, portalName: 'runtime-fixture', allowExec: false, kitsEnabled: false, autoStart: false, backgroundEnabled: false });
+    await window.beings.save({ ...settings, ...input, portalName: 'runtime-fixture', allowExec: false, kitsEnabled: false, permissionMode: 'full-access', autoStart: false, backgroundEnabled: false });
     await window.beings.startPortal();
   }, { connectionLink: `http://127.0.0.1:${server.address().port}/fixture/?token=${token}`, workspace: path.join(temporary, '中文 workspace') });
   const state = async () => (await page.evaluate(() => window.beings.snapshot())).portal;
@@ -98,7 +98,11 @@ try {
   const connected = await state();
   const pid = connected.pid;
   const startupSettings = (await page.evaluate(() => window.beings.snapshot())).settings;
-  assert.equal(startupSettings.portalConfigPath, undefined);
+  // The client-generated config is persisted so the selected subagent model
+  // reaches the managed Portal on the next start; only user-imported configs
+  // remain distinguishable through their original path.
+  assert.equal(startupSettings.portalConfigPath, path.join(temporary, 'profile', 'desktop-portal.toml'));
+  await readFile(startupSettings.portalConfigPath, 'utf8');
   assert.equal(startupSettings.workspace, path.join(temporary, '中文 workspace'));
   const missingConfig = path.join(temporary, 'missing-portal.toml');
   const conciseError = await page.evaluate(async portalConfigPath => {
@@ -155,6 +159,7 @@ try {
   await frame.locator('#file-input').setInputFiles({ name: 'draft.txt', mimeType: 'text/plain', buffer: Buffer.from('private draft attachment') });
   await frame.locator('#pending-files.active').waitFor();
   const openPortal = async () => {
+    await waitForChatReady(page);
     await page.locator('#options-trigger').click();
     await clickWhenPointerReady(page, page.locator('#client-settings-button'));
     await page.locator('#client-settings-dialog[open]').waitFor();
@@ -209,6 +214,7 @@ try {
   assert.equal(await frame.locator('#pending-files.active').count(), 1);
   assert.equal(chatRequests.length, 0);
   await frame.locator('#input').fill('');
+  await frame.locator('#pending-files .pending-file').hover();
   await frame.getByRole('button', { name: '移除 draft.txt', exact: true }).click();
   await page.locator('#scene-compose').click();
   await page.locator('#companion-panel').waitFor({ state: 'hidden' });

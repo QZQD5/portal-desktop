@@ -1,5 +1,9 @@
+import { AnimatePresence } from "motion/react";
+import { DropdownMenuMotion } from "../../shared/components/animate-ui/dropdown-menu-motion";
+import { NavigationMenuMotion } from "../../shared/components/animate-ui/navigation-menu-motion";
 import { IconButton } from '../../shared/components/icon-button';
 import { Icon } from '../../shared/icons/icon';
+import { NavigationIcon } from '../../shared/icons/navigation';
 import { SbsControl } from "../../shared/components/sbs-control";
 import { createPortal } from "react-dom";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -16,32 +20,29 @@ export function Topbar({ model }: { model: AppModel }) {
 function ReadyTopbar({ model: app }: { model: AppModel }) {
   const town = useModel(app.town);
   const [expanded, setExpanded] = useState(false),
-    [visible, setVisible] = useState(false),
     [help, setHelp] = useState(false);
   const options = useRef<HTMLDetailsElement>(null),
-    menu = useRef<HTMLDivElement>(null),
     trigger = useRef<HTMLElement>(null);
   const helpButton = useRef<HTMLButtonElement>(null),
     backButton = useRef<HTMLButtonElement>(null);
-  const motion = useRef<Animation | null>(null);
   const pendingFocus = useRef<number | null>(null);
   const pendingSectionFocus = useRef<"help" | "back" | null>(null);
   useLayoutEffect(() => {
     // The target is hidden until React commits the new section. Focusing it
     // inside the click/Escape handler fails and leaves the next key on body.
-    if (expanded && visible && pendingSectionFocus.current) {
+    if (expanded && pendingSectionFocus.current) {
       const target = pendingSectionFocus.current === "back" ? backButton : helpButton;
       target.current?.focus();
     }
     pendingSectionFocus.current = null;
-  }, [expanded, visible, help]);
+  }, [expanded, help]);
   const showHelp = (open: boolean) => {
     pendingSectionFocus.current = open ? "back" : "help";
     setHelp(open);
   };
   useLayoutEffect(() => {
-    if (expanded && visible && pendingFocus.current !== null) {
-      const buttons = menu.current?.querySelectorAll<HTMLButtonElement>(
+    if (expanded && pendingFocus.current !== null) {
+      const buttons = options.current?.querySelectorAll<HTMLButtonElement>(
         "#options-home button:not(:disabled)",
       );
       if (buttons?.length)
@@ -50,70 +51,13 @@ function ReadyTopbar({ model: app }: { model: AppModel }) {
         ]?.focus();
       pendingFocus.current = null;
     }
-  }, [expanded, visible]);
+  }, [expanded]);
   const toggle = (open: boolean, restore = false) => {
     pendingSectionFocus.current = null;
-    if (open) {
-      setHelp(false);
-      setVisible(true);
-    }
+    if (open) setHelp(false);
     setExpanded(open);
     if (restore) trigger.current?.focus();
   };
-  useLayoutEffect(() => {
-    if (!visible) {
-      motion.current?.cancel();
-      motion.current = null;
-      return;
-    }
-    const node = menu.current!;
-    const from = motion.current
-      ? {
-          opacity: getComputedStyle(node).opacity,
-          transform: getComputedStyle(node).transform,
-        }
-      : {
-          opacity: expanded ? "0" : "1",
-          transform: expanded
-            ? "translateY(-5px) scale(.98)"
-            : "translateY(0) scale(1)",
-        };
-    motion.current?.cancel();
-    const animation = node.animate(
-      [
-        from,
-        {
-          opacity: expanded ? "1" : "0",
-          transform: expanded
-            ? "translateY(0) scale(1)"
-            : "translateY(-5px) scale(.98)",
-        },
-      ],
-      {
-        duration: matchMedia("(prefers-reduced-motion: reduce)").matches
-          ? 0
-          : expanded
-            ? 180
-            : 120,
-        easing: "cubic-bezier(.2,.8,.2,1)",
-        fill: "forwards",
-      },
-    );
-    motion.current = animation;
-    animation.onfinish = () => {
-      if (!expanded) {
-        // Keep the final transparent frame until React closes <details>.
-        // Cancelling here reveals the menu before that render commits.
-        setVisible(false);
-        return;
-      }
-      animation.cancel();
-      motion.current = null;
-    };
-    return () => {
-      animation.onfinish = null;
-    };
-  }, [expanded, visible]);
   useEffect(() => {
     const outside = (event: Event) => {
       if (!options.current?.contains(event.target as Node)) setExpanded(false);
@@ -126,10 +70,10 @@ function ReadyTopbar({ model: app }: { model: AppModel }) {
       document.removeEventListener("pointerdown", outside);
       document.removeEventListener("focusin", outside);
       window.removeEventListener("blur", blur);
-      motion.current?.cancel();
     };
   }, []);
   const hasToken = Boolean(app.snapshot?.settings.hasToken);
+  const sceneName = hasToken && !app.subagentSettingsOpen ? app.snapshot?.chatScene?.scene_meta.scene_label : undefined;
   const checkingUpdate = app.updateChecking || app.update?.phase === "checking";
   const updateActivity = app.update?.activity;
   const portal = app.snapshot?.portal;
@@ -140,7 +84,7 @@ function ReadyTopbar({ model: app }: { model: AppModel }) {
   };
   return (
     <header className={`topbar ${styles.bar}`}>
-      <div aria-hidden="true" />
+      {sceneName ? <h2 id="current-chat-scene" className={styles.sceneName} title={sceneName}>{sceneName}</h2> : <div aria-hidden="true" />}
       <div className="pair-name" hidden={app.subagentSettingsOpen}>
         <SbsControl name={town.displayName || app.snapshot?.settings.being || "Being"} known={hasToken && app.sbsKnown && !app.chatLoading} enabled={app.sbsEnabled}
           origin={app.chatSbsOrigin} phase={app.chatSbsPhase} showContent={app.chatShowSbsMessages} allScenes={app.chatHistoryScope==='all'}
@@ -158,10 +102,10 @@ function ReadyTopbar({ model: app }: { model: AppModel }) {
             if (app.snapshot) app.applySnapshot(app.snapshot, true);
           }}
         >
-          <Icon name="sync" />
+          <Icon name="refresh" />
         </IconButton>
         {app.view === "chat" && !app.subagentSettingsOpen && <IconButton
-          id="toggle-being-info" className="topbar-icon-button" label="资料库"
+          id="toggle-being-info" className="topbar-icon-button" label="资料"
           aria-controls="being-info" aria-expanded={app.beingInfoOpen} onClick={app.toggleBeingInfo}>
           <Icon name="person" />
         </IconButton>}
@@ -177,7 +121,7 @@ function ReadyTopbar({ model: app }: { model: AppModel }) {
           className="rail-settings-menu"
           id="conversation-options"
           ref={options}
-          open={visible}
+          open={expanded}
           onClick={(event) => {
             const button = (event.target as Element).closest("button");
             if (
@@ -204,7 +148,7 @@ function ReadyTopbar({ model: app }: { model: AppModel }) {
                 return;
               }
               const buttons = [
-                ...menu.current!.querySelectorAll<HTMLButtonElement>(
+                ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
                   `${help ? "#options-secondary" : "#options-home"} button:not(:disabled)`,
                 ),
               ];
@@ -231,10 +175,11 @@ function ReadyTopbar({ model: app }: { model: AppModel }) {
               toggle(!expanded);
             }}
           >
-            <Icon name="sliders" />
+            <NavigationIcon name="rail-settings" />
           </summary>
-          <div className="options-menu" ref={menu} inert={!expanded}>
-            <div id="options-home" hidden={help}>
+          <AnimatePresence>{expanded && <DropdownMenuMotion className="options-menu">
+            <NavigationMenuMotion className="options-viewport" page={help ? "help" : "home"} forward={help}>
+            {!help ? <div id="options-home">
               <button type="button" id="local-portal-status" className="options-portal-status"
                 aria-label={`本机 Portal：${localStatus.label}，查看运行状态`}
                 title={`${app.snapshot?.settings.portalName || '本机 Portal'} · ${localStatus.label}${portal?.message ? `\n${portal.message}` : ''}`}
@@ -294,8 +239,7 @@ function ReadyTopbar({ model: app }: { model: AppModel }) {
               <span id="client-version" aria-label="当前客户端版本">
                 {app.update?.currentVersion ? `v${app.update.currentVersion}` : "正在读取版本…"}
               </span>
-            </div>
-            <div id="options-secondary" hidden={!help}>
+            </div> : <div id="options-secondary">
               <button
                 id="options-back"
                 ref={backButton}
@@ -331,8 +275,9 @@ function ReadyTopbar({ model: app }: { model: AppModel }) {
               >
                 隐私说明
               </button>
-            </div>
-          </div>
+            </div>}
+            </NavigationMenuMotion>
+          </DropdownMenuMotion>}</AnimatePresence>
         </details>, document.body)}
       </div>
     </header>

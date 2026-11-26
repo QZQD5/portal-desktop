@@ -9,13 +9,14 @@ import { StringDecoder } from 'node:string_decoder';
 import type { Connection } from '../chat/connection';
 import { redact } from '../chat/connection';
 import type { PortalState, Settings } from '../../shared/types';
-import { windowsEnvironment, windowsExecutable } from './windows';
+import { signalWindowsSandboxCancel, windowsEnvironment, windowsExecutable } from './windows';
 import { saveForegroundRecord } from './foreground-record';
 import { permissionMode } from '../../shared/security';
+import { ensurePortalRuntime } from './task-runtime';
 
 export function portalConfig(settings: Settings): string {
   // JSON string escaping is compatible with TOML basic strings, including Windows paths.
-  return `name = ${JSON.stringify(settings.portalName)}\nworkspace = ${JSON.stringify(settings.workspace)}\nbind = "127.0.0.1:9100"\nkits_enabled = ${settings.kitsEnabled}\n\n[tools]\nexec = ${settings.allowExec}\nfile = true\nscreenshot = true\nweb_fetch = true\nsearch = true\ncustom_tools_enabled = ${settings.kitsEnabled}\n\n[security]\npermission_mode = ${JSON.stringify(permissionMode(settings.permissionMode))}\nexec_allowlist = []\nmax_file_size = 10485760\n`;
+  return `name = ${JSON.stringify(settings.portalName)}\nworkspace = ${JSON.stringify(settings.workspace)}\nbind = "127.0.0.1:9100"\nkits_enabled = ${settings.kitsEnabled}\n\n[tools]\nexec = ${settings.allowExec}\nfile = true\nscreenshot = true\nweb_fetch = true\nsearch = true\ncustom_tools_enabled = ${settings.kitsEnabled}\n\n[subagent]\nenabled = true\nauto_install = true\ninherit_model = true\n\n[security]\npermission_mode = ${JSON.stringify(permissionMode(settings.permissionMode))}\nexec_allowlist = []\nmax_file_size = 10485760\n`;
 }
 
 export function portalArguments(config: string, settings: Settings): string[] {
@@ -69,8 +70,10 @@ export class PortalSupervisor extends EventEmitter {
     const configPath = settings.portalConfigPath || path.join(this.directory, 'desktop-portal.toml');
     if (settings.portalConfigPath) await access(configPath, constants.R_OK);
     else await writeFile(configPath, portalConfig(settings), { mode: 0o600 });
+    const runtime = await ensurePortalRuntime(settings.portalBinary, this.directory);
     this.secrets = [connection.token, connection.relaySecret];
-    this.run = { settings: { ...settings }, connection: { ...connection }, configPath, environment: { ...environment } };
+    this.run = { settings: { ...settings }, connection: { ...connection }, configPath,
+      environment: { ...environment, ...(runtime ? { HEART_PORTAL_RUNTIME_DIR: runtime } : {}) } };
     this.wanted = true;
     this.crashes = 0;
     const failure = this.launch();
@@ -219,14 +222,21 @@ export class PortalSupervisor extends EventEmitter {
         this.publish({ phase: 'error', message: '无法确认 Portal 已停止，请检查进程或系统权限后重试。' });
         reject(new Error('Portal process cleanup was not confirmed'));
       }, 18_000);
+      let forcing = false;
       const force = () => {
-        if (!child.pid) return;
-        if (process.platform === 'win32') {
-          const killer = spawn(windowsExecutable('taskkill'), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
-          killer.on('error', () => { child.kill(); });
-        } else {
-          try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
-        }
+        if (!child.pid || forcing || done) return;
+        const pid = child.pid;
+        forcing = true;
+        void (async () => {
+          if (process.platform === 'win32') {
+            await signalWindowsSandboxCancel(pid);
+            if (done || child.exitCode !== null || child.signalCode !== null) return;
+            const killer = spawn(windowsExecutable('taskkill'), ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+            killer.on('error', () => { child.kill(); });
+          } else {
+            try { process.kill(-pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+          }
+        })();
       };
       const timer = setTimeout(force, 12_000);
       child.once('exit', finish);

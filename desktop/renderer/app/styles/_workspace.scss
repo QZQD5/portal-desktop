@@ -1,7 +1,7 @@
 /* Three-column workspace: destinations, active page, dismissible Being details. */
 .workspace-rail {
-  width: 76px;
-  flex: 0 0 76px;
+  width: var(--workspace-rail-width);
+  flex: 0 0 var(--workspace-rail-width);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -11,14 +11,64 @@
   -webkit-app-region: drag;
 }
 
-.workspace-body > :is(.being-info, .client-file-viewer, .cloud-browser-pane, #browser-panel, .plugin-sidebar, #subagent-model-panel) {
+html[data-platform='darwin'] .workspace-window-drag {
+  position: absolute;
+  inset: 0 var(--panel-gap) auto var(--workspace-rail-width);
+  height: var(--panel-gap);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+html[data-platform='darwin'] :is(.chat-session-titlebar, #place-panel > .place-sheet-heading) {
+  -webkit-app-region: drag;
+  user-select: none;
+
+  button {
+    -webkit-app-region: no-drag;
+  }
+}
+
+// Windows keeps the native caption outside the renderer. The Mac layout
+// reserves that inset inside the frameless content area, so reusing it on
+// Windows leaves an unnecessary blank band above the workspace.
+html[data-platform='win32'] .workspace-rail {
+  padding-top: 10px;
+}
+
+html[data-platform='win32'] .workspace-rail .rail-links {
+  position: static;
+  transform: none;
+  max-height: none;
+  margin-block: auto;
+}
+
+html[data-platform='win32'] .workspace-stage .topbar {
+  height: 64px;
+}
+
+.workspace-body
+  > :is(
+    .being-info,
+    .client-file-viewer,
+    .cloud-browser-pane,
+    #browser-panel,
+    .plugin-sidebar,
+    #subagent-model-panel
+  ) {
   --resize-gap: var(--panel-gap);
 
   margin-left: var(--panel-gap);
   border: 0;
+  outline: 1px solid var(--panel-border);
+  outline-offset: -1px;
   border-radius: var(--panel-radius);
-  box-shadow: var(--panel-shadow);
+  box-shadow: none;
   overflow: visible;
+}
+
+.workspace-body > #being-info,
+.workspace-content > #chat-view {
+  --panel-border: var(--workspace-panel-border);
 }
 
 /* Clip the content corners without clipping the handle in the shared gutter. */
@@ -72,7 +122,7 @@
   padding: 8px 0;
 }
 
-.workspace-rail button {
+.workspace-rail .rail-button {
   display: grid;
   place-items: center;
   flex-shrink: 0;
@@ -84,11 +134,6 @@
   transition:
     background-color 140ms ease,
     color 140ms ease;
-}
-
-.workspace-rail button[aria-current='page'] {
-  background: var(--surface);
-  color: var(--text);
 }
 
 .workspace-rail .rail-button:hover:not(:disabled),
@@ -107,7 +152,24 @@
   background: var(--surface);
 }
 
-.workspace-rail svg {
+.workspace-rail .rail-button[aria-current='page'],
+.workspace-rail .rail-button[aria-current='page']:is(:hover, :focus-visible) {
+  background: var(--selected);
+  color: var(--text);
+}
+
+.workspace-rail .rail-button > svg[data-navigation-icon] {
+  color: light-dark(#777, var(--neutral-secondary));
+  stroke-width: 1.35;
+}
+
+.workspace-rail
+  .rail-button:is([aria-current='page'], :hover, :focus-visible):not(:disabled)
+  > svg[data-navigation-icon] {
+  color: light-dark(#2a2a2a, var(--neutral-text));
+}
+
+.workspace-rail .rail-button > svg {
   width: 28px;
   height: 28px;
 }
@@ -116,11 +178,15 @@
   transition: transform 420ms cubic-bezier(0.2, 0.65, 0.3, 1);
 }
 
-.workspace-rail .rail-button:is(:hover, :focus-visible):not(:disabled) > :is(svg, img, span[aria-hidden='true']) {
+.workspace-rail
+  .rail-button:is(:hover, :focus-visible):not(:disabled)
+  > :is(svg, img, span[aria-hidden='true']) {
   transform: rotate(-6deg) scale(1.08);
 }
 
-.workspace-rail .rail-button:is(:hover, :focus-visible):not(:disabled, :active) > svg[data-navigation-icon] {
+.workspace-rail
+  .rail-button:is(:hover, :focus-visible):not(:disabled, :active)
+  > svg[data-navigation-icon] {
   transform: scale(1.04);
 }
 
@@ -159,7 +225,9 @@ html[data-platform='darwin'] .workspace-stage .topbar {
 }
 
 .workspace-rail .rail-scene-toggle > :is(svg, .rail-scene-avatar) {
-  transition: opacity 240ms ease, transform 300ms cubic-bezier(0.2, 0.65, 0.3, 1);
+  transition:
+    opacity 240ms ease,
+    transform 300ms cubic-bezier(0.2, 0.65, 0.3, 1);
 }
 
 .workspace-rail .rail-scene-toggle > svg {
@@ -178,7 +246,9 @@ html[data-platform='darwin'] .workspace-stage .topbar {
   transform: none;
 }
 
-.workspace-rail .rail-button.rail-scene-toggle:is(:hover, :focus-visible):not(:disabled) > .rail-scene-avatar {
+.workspace-rail
+  .rail-button.rail-scene-toggle:is(:hover, :focus-visible):not(:disabled)
+  > .rail-scene-avatar {
   opacity: 0;
   transform: scale(0.96);
 }
@@ -231,7 +301,7 @@ html[data-platform='darwin'] .workspace-stage .topbar {
   min-height: 0;
   height: auto;
   border: 0;
-  box-shadow: var(--panel-shadow);
+  box-shadow: none;
   z-index: 1;
 }
 
@@ -249,7 +319,7 @@ html[data-platform='darwin'] .workspace-stage .topbar {
   overflow: hidden;
   border-left: 1px solid var(--line);
   padding: 48px 24px 0;
-  background: var(--bg);
+  background: var(--workspace-panel);
 }
 
 .being-info-close {
@@ -439,9 +509,11 @@ html[data-platform='darwin'] .workspace-stage .topbar {
 }
 
 @media (max-width: 800px) {
+  :root {
+    --workspace-rail-width: 64px;
+  }
+
   .workspace-rail {
-    width: 64px;
-    flex-basis: 64px;
     padding-inline: 10px;
   }
 
@@ -459,7 +531,7 @@ html[data-platform='darwin'] .workspace-stage .topbar {
     animation: none;
   }
 
-  .workspace-rail button {
+  .workspace-rail .rail-button {
     transition: none;
   }
 }
@@ -473,13 +545,17 @@ html[data-platform='darwin'] .workspace-stage .topbar {
 }
 
 .workspace-content > :is(#chat-view, #place-panel) {
+  border: 0;
+  outline: 1px solid var(--panel-border);
+  outline-offset: -1px;
   border-radius: var(--panel-radius);
   background: var(--bg);
-  box-shadow: var(--panel-shadow);
+  box-shadow: none;
   overflow: clip;
 }
 
 .workspace-content > #chat-view {
+  background: var(--workspace-panel);
   position: relative;
   min-width: 0;
   flex: 1;
@@ -493,7 +569,6 @@ html[data-platform='darwin'] .workspace-stage .topbar {
   order: 0;
   flex: 0 1 var(--chat-pane-width, 640px);
   min-width: 300px;
-  border: 0;
 }
 
 .workspace-content.split-chat > #place-panel {
@@ -533,9 +608,9 @@ html[data-platform='darwin'] .workspace-stage .topbar {
   }
 
   .workspace-content.split-chat > #chat-view {
-    flex: 1;
+    flex: 0 1 28%;
     min-width: 0;
-    border-right: 0;
+    min-height: 160px;
   }
 }
 
@@ -568,21 +643,30 @@ html[data-platform='darwin'] .workspace-stage .topbar {
 }
 
 .workspace-rail .rail-links {
-  justify-content: flex-start;
-  gap: 6px;
-  padding: 10px 0;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+
+  // Reserve equal space for the avatar and bottom controls without shifting the center.
+  max-height: calc(100% - 232px);
+  flex: 0 1 auto;
+  justify-content: safe center;
+  gap: 8px;
+  padding: 5px 4px;
   min-height: 0;
+  border-radius: 26px;
+  background: color-mix(in srgb, var(--control) 80%, transparent);
+  box-shadow: var(--panel-shadow);
 }
 
 .workspace-rail .rail-being {
   flex: none;
-  background: var(--surface);
-  border: 0;
-  font: 550 20px/1 var(--font-sans);
-  color: var(--text);
+  width: 48px;
+  height: 48px;
+  font: 22px/1 var(--font-sans);
   margin-bottom: 10px;
-  border-radius: 14px;
-  box-shadow: 0 2px 5px color-mix(in srgb, var(--text) 5%, transparent);
+  border-radius: 50%;
+  box-shadow: none;
 }
 
 .workspace-rail .rail-being:hover:not(:disabled) {
@@ -663,42 +747,39 @@ body:has(.rail-links[data-sorting]) .rail-tooltip {
 }
 
 .rail-tooltip {
-  position: fixed;
   z-index: 10020;
-  transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 12px;
-  border: 0;
-  border-radius: 12px;
-  background: var(--control);
-  color: var(--text);
-  box-shadow: 0 10px 28px #00000024, 0 2px 6px #0000000a;
-  font-size: 13px;
-  line-height: 18px;
-  max-width: 240px;
-  pointer-events: none;
-  animation: tooltip-in 0.12s ease-out;
   -webkit-app-region: no-drag;
 }
 
-.rail-tooltip kbd {
+/* stylelint-disable-next-line selector-class-pattern -- Shared global component selector. */
+.rail-tooltip .warm-tooltip__box {
+  box-shadow:
+    0 10px 28px #00000024,
+    0 2px 6px #0000000a;
+}
+
+/* stylelint-disable-next-line selector-class-pattern -- Shared global component selector. */
+.rail-tooltip .warm-tooltip__text {
+  flex: none;
+  width: max-content;
+  max-width: 216px;
+  gap: 12px;
+  font-weight: inherit;
+  line-height: 18px;
+  letter-spacing: normal;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* stylelint-disable-next-line selector-class-pattern -- Shared global component selector. */
+.rail-tooltip .warm-tooltip__kbd {
+  height: auto;
+  padding: 0;
+  background: none;
+  box-shadow: none;
   color: var(--secondary);
   font: inherit;
   white-space: nowrap;
-}
-
-@keyframes tooltip-in {
-  from {
-    opacity: 0;
-    margin-left: -4px;
-  }
-
-  to {
-    opacity: 1;
-    margin-left: 0;
-  }
 }
 
 .workspace-content > #chat-view,
@@ -714,6 +795,8 @@ body:has(.rail-links[data-sorting]) .rail-tooltip {
 .chat-session-panel {
   max-width: calc(100% - 48px);
   border: 0;
+  outline: 1px solid var(--panel-border);
+  outline-offset: -1px;
   border-radius: var(--panel-radius);
 }
 
@@ -744,6 +827,27 @@ body:has(.rail-links[data-sorting]) .rail-tooltip {
   overflow: clip;
 }
 
+@media (prefers-reduced-transparency: no-preference) {
+  html[data-platform='darwin']:has(#client-main:not([hidden])) {
+    &,
+    body,
+    #client-main {
+      background: transparent;
+    }
+
+    .workspace-body {
+      background: light-dark(rgb(246 246 246 / 78%), rgb(26 26 26 / 62%));
+    }
+  }
+
+  @container stage (width > 700px) {
+    html[data-platform='darwin'] .chat-session-panel[data-pinned='true'] {
+      background: transparent;
+      outline-color: transparent;
+    }
+  }
+}
+
 @container stage (max-width: 700px) {
   .chat-session-panel[data-pinned='true'] {
     position: absolute;
@@ -751,6 +855,13 @@ body:has(.rail-links[data-sorting]) .rail-tooltip {
     margin-right: 0;
     max-width: calc(100% - 16px);
     box-shadow: var(--popover-shadow);
+  }
+
+  @media (prefers-reduced-transparency: no-preference) {
+    html[data-platform='darwin'] .chat-session-panel[data-pinned='true'] {
+      background: light-dark(rgb(246 246 246 / 78%), rgb(26 26 26 / 80%));
+      backdrop-filter: blur(50px);
+    }
   }
 
   .chat-session-panel > [data-slot='panel-resize-handle'] {
@@ -784,19 +895,13 @@ body:has(.rail-links[data-sorting]) .rail-tooltip {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .rail-tooltip {
-    animation: none;
-  }
-}
-
 @container chat (max-width: 440px) {
   #chat-view > .topbar {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
     padding-inline: 12px;
 
-    > :first-child {
+    > [aria-hidden='true'] {
       display: none;
     }
 
@@ -809,6 +914,19 @@ body:has(.rail-links[data-sorting]) .rail-tooltip {
     .topbar-actions {
       grid-column: 2;
       gap: 8px;
+    }
+
+    &:has(> #current-chat-scene) {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+
+      .pair-name {
+        grid-column: 2;
+        justify-self: center;
+      }
+
+      .topbar-actions {
+        grid-column: 3;
+      }
     }
   }
 }

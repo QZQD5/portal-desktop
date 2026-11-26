@@ -8,6 +8,7 @@ import { registerChatIpc } from '../chat/ipc';
 import { ChatProxy } from '../chat/proxy';
 import { createDesktopHome } from '../home/desktop';
 import { HomeService } from '../home/service';
+import { ConnectorNetwork } from '../home/network';
 import { downloadFetch } from '../kits/download-fetch';
 import { KitInstaller } from '../kits/install';
 import { registerKitsIpc } from '../kits/ipc';
@@ -18,6 +19,7 @@ import { resolvePluginModel } from '../plugins/dsh/being-model';
 import { BackgroundPortal } from '../portal/background';
 import { createPortalController } from '../portal/controller';
 import { registerPortalIpc } from '../portal/ipc';
+import { SubagentModelNetwork } from '../portal/subagent-network';
 import { PortalSupervisor } from '../portal/supervisor';
 import { TOWN_ORIGIN, TownClient, TownCredentials, type TownRequestEvent } from '../town/client';
 import { registerTownIpc } from '../town/ipc';
@@ -50,6 +52,7 @@ export interface DesktopOptions {
 /** Composition root: constructs features and supplies their cross-feature callbacks. */
 export function createDesktopApplication(options: DesktopOptions) {
   const { userData, shellURL } = options;
+  const connectorNetwork = new ConnectorNetwork(shellURL);
   let closePluginSessions = () => { };
   let home: HomeService | undefined;
   let portal: PortalSupervisor;
@@ -66,6 +69,7 @@ export function createDesktopApplication(options: DesktopOptions) {
   let stopBackgroundPoll = () => { };
   let stopResourceMonitor = () => { };
   const errorLog = new ClientErrorLog(userData, () => [store?.connection?.token || '', store?.connection?.relaySecret || '']);
+  const subagentNetwork = new SubagentModelNetwork(shellURL, error => errorLog.report('subagent-model', error), (url, init) => net.fetch(url as string, init));
   const mutations = new MutationQueue();
   const exclusive = mutations.run;
   const cleanupForQuit = async () => {
@@ -96,6 +100,11 @@ export function createDesktopApplication(options: DesktopOptions) {
   const { showWindow, finishQuit } = lifecycle;
 
   async function ready() {
+    // OAuth success pages wake the installed client without carrying credentials.
+    try {
+      if (app.isPackaged) app.setAsDefaultProtocolClient('being-app');
+      else if (process.argv[1]) app.setAsDefaultProtocolClient('being-app', process.execPath, [process.argv[1]]);
+    } catch (error) { errorLog.report('connector-protocol', error); }
     stopResourceMonitor = startResourceMonitor(errorLog);
     if (process.platform === 'win32') {
       try { repairDevelopmentShortcut(app.getPath('appData'), shell); }
@@ -176,7 +185,7 @@ export function createDesktopApplication(options: DesktopOptions) {
         return net.fetch(request, { bypassCustomProtocolHandlers: true });
       });
     }
-    registerLocalProtocol(assets, proxy, plugins, attachmentDownloads, localFiles, dshPlugins);
+    registerLocalProtocol(assets, proxy, plugins, attachmentDownloads, localFiles, dshPlugins, connectorNetwork, subagentNetwork, shellURL);
     voice = new VoiceGateway({
       directory, resources: app.isPackaged ? process.resourcesPath : path.resolve('resources'), packaged: app.isPackaged,
       scenes: () => chatSessions?.list(store.connection?.endpoint) || [],
@@ -216,7 +225,9 @@ export function createDesktopApplication(options: DesktopOptions) {
     handle('beings:voice-start', () => voice!.start());
     handle('beings:voice-stop', () => voice!.disconnect());
     handle('beings:voice-send', (event: import('../../shared/voice').VoiceEvent) => voice!.send(event));
-    home = await createDesktopHome({ directory, assets, secretStorage, store, window: () => lifecycle.window, handle });
+    const desktopHome = await createDesktopHome({ directory, assets, secretStorage, store, window: () => lifecycle.window, handle, network: connectorNetwork,
+      log: (event, fields) => errorLog.info('home-viewer', JSON.stringify({ event, ...fields })) });
+    home = desktopHome.home;
     registerShellIpc({
       handle, exclusive, directory, store, localFiles, attachmentDownloads, approvalDialogs,
       window: () => lifecycle.window, browser: () => lifecycle.browser
@@ -236,6 +247,7 @@ export function createDesktopApplication(options: DesktopOptions) {
     const snapshot = chat.registerSessions(handle, exclusive, () => portalController.notice, () => closePluginSessions());
     registerPortalIpc({
       handle, exclusive, controller: portalController, snapshot,
+      network: subagentNetwork, isQuitting: () => lifecycle.quitting,
       beforeSave: () => { cancelTownPairing?.(); approvalDialogs.cancel(); },
       afterSave: async () => {
         closePluginSessions(); proxy.abortAll();
@@ -252,7 +264,7 @@ export function createDesktopApplication(options: DesktopOptions) {
       clearWarning: () => { townWarning = undefined; },
       open: url => lifecycle.browser?.open(url),
     });
-    registerKitsIpc({ handle, exclusive, window: () => lifecycle.window, store, kitInstaller });
+    registerKitsIpc({ handle, exclusive, window: () => lifecycle.window, store, kitInstaller, homeConnectors: desktopHome.connectors });
     desktopPlugins.registerIpc(handle, exclusive);
     registerDshIpc(handle, dshPlugins!, () => lifecycle.window);
     const chatIpc = registerChatIpc({

@@ -1,14 +1,23 @@
+import { CopyFeedbackIcon } from './copy-feedback';
+import { ChatActionTooltip } from './chat-action-tooltip';
+import { CopyMessage } from './copy-message';
+import { Dialog } from './dialog';
 import { homeFileReference, beingFileBlocks } from '../../../shared/being-files';
 import { BeingFilesMessage, HomeFileLink } from './being-files';
 import { StreamingMarkdown } from '../lib/streaming-markdown';
 import { LocalFileAction, LocalFileLink } from './local-file-link';
-import { RemoteImage } from './remote-image';
+import { RemoteImage, RemoteImageGroup } from './remote-image';
+import { MessageImageGroup } from './message-image-group';
+import { MessageCaptionAnchor, MessageCaptionSlot } from './message-action-slot';
+import { Icon } from '../icons/icon';
+import codeStyles from './markdown-code-copy.module.scss';
+import { remoteImageURL } from '../../../shared/remote-image';
 import { MarkdownReferences, MarkdownReferenceScope } from './markdown-references';
 import { localFileReference } from '../../../shared/local-file';
 import { IntelligentUI } from "../intelligent-ui/view";
 import hljs from "highlight.js/lib/common";
 import type { Emitter } from "highlight.js";
-import { Fragment, memo, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { detectStructuredText, formatJSON } from '../lib/structured-text';
 import { marked, type Token, type Tokens } from "marked";
 import {
@@ -140,16 +149,17 @@ interface MarkdownProps {
 export const Markdown = memo(function Markdown(props: MarkdownProps) {
   const blocks = useMemo(() => beingFileBlocks(props.content), [props.content]);
   if (!blocks.length) return <MarkdownText {...props} />;
-  return <MarkdownReferenceScope text={props.content}><div className={props.className ?? 'reading-text'}>
+  const filesOnly = !props.streaming && blocks.every(block => block.kind === 'files' ? !!block.receipt.files : !block.text.trim());
+  return <MarkdownReferenceScope text={props.content}><div className={props.className ?? 'reading-text'} data-delivered-files-only={filesOnly || undefined}>
     {blocks.map((block, index) => block.kind === 'files'
       ? <BeingFilesMessage key={block.start} receipt={block.receipt} streaming={props.streaming ?? false} source={block.text} />
-      : <MarkdownText {...props} key={block.start} content={block.text} className="" leadingContent={index === 0 ? props.leadingContent : undefined} />)}
+      : <MarkdownText {...props} key={block.start} content={block.text} className="" withinFileReceipt leadingContent={index === 0 ? props.leadingContent : undefined} />)}
   </div></MarkdownReferenceScope>;
 });
 
 /** Markdown tokens become React elements. Raw HTML has no execution/rendering path. */
 const MarkdownText = memo(function MarkdownText({
-  content,
+  content: source,
   className = "reading-text",
   onPlace,
   chat = false,
@@ -158,8 +168,55 @@ const MarkdownText = memo(function MarkdownText({
   leadingContent,
   previewMarkdownCode = true,
   intelligentUI = false,
-  streaming = false,
-}: MarkdownProps) {
+  streaming: receiving = false,
+  withinFileReceipt = false,
+}: MarkdownProps & { withinFileReceipt?: boolean }) {
+  const captionSlot = useContext(MessageCaptionSlot);
+  const [content, setContent] = useState(source);
+  const reveal = useRef({ source: '', text: '', position: 0, receiving: false });
+  useLayoutEffect(() => {
+    const progress = reveal.current;
+    // Smooth only live chat prose. History, replacements and nested Markdown
+    // previews stay immediate; previews already receive the revealed source.
+    const animate = chat && previewMarkdownCode && (receiving || progress.receiving) &&
+      source.startsWith(progress.source) && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    progress.source = source;
+    progress.receiving = receiving;
+    if (!animate) {
+      progress.text = source;
+      progress.position = source.length;
+      setContent(source);
+      return;
+    }
+    // Show the first character before paint, even when the first packet is large.
+    if (!progress.text && source) {
+      progress.position = source.codePointAt(0)! > 0xffff ? 2 : 1;
+      progress.text = source.slice(0, progress.position);
+    }
+    setContent(progress.text);
+    if (progress.text === source) return;
+    // Keep fractional progress across packets and use elapsed time so speed is
+    // independent of refresh rate. Large bursts catch up within 240 ms, including
+    // the final packet, without pushing animation state into the chat store.
+    const speed = Math.max(0.06, (source.length - progress.position) / 240);
+    let previous = performance.now();
+    let frame = requestAnimationFrame(tick);
+    function tick(now: number) {
+      // A callback scheduled during this frame can receive its frame-start
+      // timestamp, which predates the effect's performance.now().
+      progress.position = Math.min(source.length, progress.position + Math.max(0, now - previous) * speed);
+      previous = Math.max(previous, now);
+      let end = Math.floor(progress.position);
+      // Do not expose half of an emoji's UTF-16 surrogate pair.
+      const last = source.charCodeAt(end - 1);
+      if (last >= 0xd800 && last <= 0xdbff && end < source.length) end--;
+      const text = source.slice(0, end);
+      if (text !== progress.text) { progress.text = text; setContent(text); }
+      if (end < source.length) frame = requestAnimationFrame(tick);
+    }
+    return () => cancelAnimationFrame(frame);
+  }, [source, receiving, chat, previewMarkdownCode]);
+  const streaming = receiving || content !== source;
   const previewLocalFile = useContext(LocalFileAction);
   const references = useContext(MarkdownReferences);
   const parser = useMemo(() => new StreamingMarkdown((source) => {
@@ -182,6 +239,10 @@ const MarkdownText = memo(function MarkdownText({
     [onPlace, renderText, leadingContent, chat, richCode, previewMarkdownCode, intelligentUI, streaming, previewLocalFile]);
   const linked = new Set<PlaceView>();
   const firstContentToken = tokens.find(token => token.type !== 'space');
+  const groupImages = chat && (withinFileReceipt || className?.split(/\s+/).includes('content'));
+  const captionToken = captionSlot && groupImages && (captionSlot.mixedMedia || tokens.some(imageParagraph))
+    ? tokens.filter(token => token.type !== 'space' && token.type !== 'def' && token.type !== 'hr' && !imageParagraph(token)).at(-1)
+    : undefined;
   // Explicit links take precedence over automatic word links throughout the message.
   function collect(list: Token[]) {
     for (const token of list) {
@@ -257,12 +318,35 @@ const MarkdownText = memo(function MarkdownText({
     );
   }
   function render(list: Token[], decorate = true, topLevel = false): ReactNode {
-    return list.map((token, index) => {
+    return list.flatMap((token, index) => {
+      if (topLevel && groupImages) {
+        const group = imageParagraph(token);
+        const previous = imageParagraph(list[index - (list[index - 1]?.type === 'space' ? 2 : 1)]);
+        if (group && previous) return [];
+        if (group) {
+          for (let end = index + 1; end < list.length; end++) {
+            const next = imageParagraph(list[end]);
+            if (next) group.push(...next);
+            else if (list[end].type !== 'space') break;
+          }
+          if (group.length > 1) {
+            const grid = <MessageImageGroup className="markdown-image-group">
+              {group.map(({src,name,title}, imageIndex) => <RemoteImage key={imageIndex} src={src} name={name} title={title} showUnavailable />)}
+            </MessageImageGroup>;
+            return <Fragment key={index}>
+              {token === firstContentToken && leadingContent && <p>{leadingContent}</p>}
+              {group.every(({src}) => remoteImageURL(src)) ? <RemoteImageGroup items={group}>{grid}</RemoteImageGroup> : grid}
+            </Fragment>;
+          }
+        }
+      }
       const before = topLevel && onPlace ? [...linked].sort().join(',') : '';
       const cached = topLevel ? blockCache.get(token) : undefined;
       if (cached && cached.before === before) {
         cached.after.forEach(view => linked.add(view));
-        return <Fragment key={index}>{cached.node}</Fragment>;
+        return token === captionToken
+          ? <div key={index} className="markdown-caption">{cached.node}<MessageCaptionAnchor /></div>
+          : <Fragment key={index}>{cached.node}</Fragment>;
       }
       const inner = ["link", "code", "codespan", "html", "image"].includes(
         token.type,
@@ -277,7 +361,7 @@ const MarkdownText = memo(function MarkdownText({
           node = null;
           break;
         case "paragraph":
-          node = <p>{token === firstContentToken && leadingContent}{inner}</p>;
+          node = <p className={topLevel && groupImages && !leadingContent && imageParagraph(token)?.length === 1 ? "markdown-image-only" : undefined}>{token === firstContentToken && leadingContent}{inner}</p>;
           break;
         case "text":
         case "escape":
@@ -377,6 +461,7 @@ const MarkdownText = memo(function MarkdownText({
           node =
             chat && href ? (
               <RemoteImage
+                showUnavailable
                 src={href}
                 name={unescapeText(image.text)}
                 title={image.title || undefined}
@@ -388,19 +473,18 @@ const MarkdownText = memo(function MarkdownText({
         }
         case "list": {
           const list = token as Tokens.List;
-          const items = list.items.map((item, i) => (
-            <li key={i}>
-              {item.task && (
-                <input
-                  type="checkbox"
-                  checked={!!item.checked}
-                  disabled
-                  readOnly
-                />
-              )}
-              {render(item.tokens, decorate)}
-            </li>
-          ));
+          const items = list.items.map((item, i) => {
+            const content = render(item.tokens, decorate);
+            if (item.task && groupImages) return (
+              <li key={i} className="markdown-task">
+                <span className="markdown-task-marker" role="img"
+                  aria-label={item.checked ? '已勾选' : '未勾选'} data-checked={!!item.checked} />
+                <div>{content}</div>
+              </li>
+            );
+
+            return <li key={i}>{item.task && <input type="checkbox" checked={!!item.checked} disabled readOnly />}{content}</li>;
+          });
           node = list.ordered ? (
             <ol start={list.start || 1}>{items}</ol>
           ) : (
@@ -410,14 +494,14 @@ const MarkdownText = memo(function MarkdownText({
         }
         case "table": {
           const table = token as Tokens.Table;
-          node = (
-            <div className="table-wrap">
+          const body = (
               <table>
                 <thead>
                   <tr>
                     {table.header.map((cell, i) => (
                       <th
                         key={i}
+                        scope="col"
                         style={{ textAlign: table.align[i] || undefined }}
                       >
                         {render(cell.tokens, decorate)}
@@ -440,8 +524,9 @@ const MarkdownText = memo(function MarkdownText({
                   ))}
                 </tbody>
               </table>
-            </div>
           );
+          node = groupImages ? <MarkdownTableScroll text={table.raw.trim()}>{body}</MarkdownTableScroll>
+            : <div className="table-wrap">{body}</div>;
           break;
         }
         case "html":
@@ -451,11 +536,77 @@ const MarkdownText = memo(function MarkdownText({
           node = token.raw;
       }
       if (topLevel) blockCache.set(token, { before, after: [...linked], node });
-      return <Fragment key={index}>{node}</Fragment>;
+      return token === captionToken
+        ? <div key={index} className="markdown-caption">{node}<MessageCaptionAnchor /></div>
+        : <Fragment key={index}>{node}</Fragment>;
     });
   }
   return <div className={className}>{leadingContent && firstContentToken?.type !== 'paragraph' && <p>{leadingContent}</p>}{render(tokens, true, true)}</div>;
 });
+
+export function isImageOnlyMarkdown(content: string) {
+  if (!content.includes('![')) return false;
+  const paragraphs = marked.lexer(content, { gfm: true, breaks: true })
+    .filter(token => token.type !== 'space' && token.type !== 'def');
+  return paragraphs.length > 0 && paragraphs.every(token => imageParagraph(token));
+}
+
+function imageParagraph(token: Token | undefined) {
+  if (token?.type !== 'paragraph') return;
+  const images: {src: string; name: string; title?: string}[] = [];
+  for (const child of (token as Tokens.Paragraph).tokens) {
+    if (child.type === 'br' || (child.type === 'text' && !(child as Tokens.Text).text.trim())) continue;
+    if (child.type !== 'image') return;
+    const image = child as Tokens.Image;
+    const src = safeLink(unescapeText(image.href));
+    if (!src) return;
+    images.push({src, name: unescapeText(image.text) || '图片', title: image.title || undefined});
+  }
+  return images.length ? images : undefined;
+}
+
+function MarkdownTableScroll({ children, text }: { children: ReactNode; text: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const expand = useRef<HTMLButtonElement>(null);
+  const copy = useContext(CodeClipboard);
+  const [overflow, setOverflow] = useState(false);
+  const [open, setOpen] = useState(false);
+  useLayoutEffect(() => {
+    const viewport = ref.current!;
+    const measure = () => setOverflow(viewport.firstElementChild!.scrollWidth > viewport.clientWidth + 1);
+    const resize = new ResizeObserver(measure);
+    resize.observe(viewport);
+    resize.observe(viewport.firstElementChild!);
+    measure();
+    return () => resize.disconnect();
+  }, []);
+  function closePreview() {
+    setOpen(false);
+    requestAnimationFrame(() => expand.current?.focus({ preventScroll: true }));
+  }
+  const scroller = <div ref={ref} className="table-wrap" tabIndex={overflow ? 0 : undefined} role="region"
+    aria-label={overflow ? '表格，可横向滚动' : '表格'}>
+    {children}
+  </div>;
+  if (typeof document === 'undefined' || document.documentElement.dataset.chatHost !== 'desktop') return scroller;
+  return <div className="markdown-table" data-copy-group>
+    <div className="markdown-table-actions" data-markdown-copy="exclude">
+      <CopyMessage appearance="chat" text={text} copy={copy} label="复制表格" />
+      {overflow && <ChatActionTooltip content="展开表格">
+        <button ref={expand} type="button" aria-label="展开表格" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)}>
+          <Icon name="lucide-maximize-2" />
+        </button>
+      </ChatActionTooltip>}
+    </div>
+    {scroller}
+    {open && <Dialog className="markdown-table-preview" open onClose={closePreview} aria-label="表格预览" dismissOnBackdrop>
+      <header><strong>表格预览</strong>
+        <button type="button" aria-label="关闭表格预览" onClick={closePreview}><Icon name="chat-close" /></button>
+      </header>
+      <div className="table-wrap" role="region" aria-label="表格，可横向滚动" tabIndex={0}>{children}</div>
+    </Dialog>}
+  </div>;
+}
 
 function MarkdownCodeBlock({ text, language, streaming }: { text: string; language: string; streaming: boolean }) {
   const [mode, setMode] = useState<"preview" | "source">("preview");
@@ -489,7 +640,7 @@ function MarkdownCodeBlock({ text, language, streaming }: { text: string; langua
           // Code samples inside the document stay as source rather than opening nested previews.
           <Markdown content={text} chat streaming={streaming} className="markdown-preview" previewMarkdownCode={false} />
         ) : (
-          <pre><code className={`hljs lang-${language}`}>{streaming ? text : <HighlightedCode text={text} language={language} />}</code></pre>
+          <pre tabIndex={0} aria-label="Markdown 源码"><code className={`hljs lang-${language}`}>{streaming ? text : <HighlightedCode text={text} language={language} />}</code></pre>
         )}
       </div>
     </div>
@@ -501,12 +652,20 @@ function CopyCode({ text }: { text: string }) {
   const [status, setStatus] = useState('复制代码');
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
-  return <button type="button" aria-label={status} onClick={async () => {
-    clearTimeout(timer.current);
-    try { await copy(text); setStatus('已复制'); }
-    catch { setStatus('复制失败，请重试'); }
-    timer.current = setTimeout(() => setStatus('复制代码'), 2000);
-  }}><span role="status">{status}</span></button>;
+  const failed = status.startsWith('复制失败');
+  return <ChatActionTooltip content={status} disabled={status === '已复制'}>
+    <button type="button" className={codeStyles.copy} data-failed={failed || undefined} aria-label={status} onClick={async () => {
+      clearTimeout(timer.current);
+      try { await copy(text); setStatus('已复制'); }
+      catch { setStatus('复制失败，请重试'); }
+      timer.current = setTimeout(() => setStatus('复制代码'), 2000);
+    }}>
+      <CopyFeedbackIcon copied={status === '已复制'}>
+        <Icon name={failed ? 'chat-retry' : status === '已复制' ? 'chat-check' : 'chat-copy'} width="16" height="16" stroke="currentColor" fill="none" />
+      </CopyFeedbackIcon>
+      <span className={codeStyles.feedback} role="status">{status === '复制代码' ? '' : status}</span>
+    </button>
+  </ChatActionTooltip>;
 }
 
 function ChatCodeBlock({ text, language, streaming }: { text: string; language: string; streaming: boolean }) {
@@ -525,7 +684,7 @@ function ChatCodeBlock({ text, language, streaming }: { text: string; language: 
         <CopyCode text={display} />
       </div>
     </div>
-    <pre><code className={`hljs lang-${language || inferred || 'text'}`}>{streaming ? display : <HighlightedCode text={display} language={json ? 'json' : language || 'plaintext'} />}</code></pre>
+    <pre tabIndex={0} aria-label="代码"><code className={`hljs lang-${language || inferred || 'text'}`}>{streaming ? display : <HighlightedCode text={display} language={json ? 'json' : language || 'plaintext'} />}</code></pre>
   </div>;
 }
 

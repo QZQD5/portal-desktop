@@ -20,7 +20,7 @@ try {
     if (url.pathname.endsWith('/stream/active')) return route.fulfill({ status: 204 });
     if (url.pathname.endsWith('/history')) return route.fulfill({ json: { messages: [
       { seq: 1, role: 'user', content: '网页样式检查', scene_id: url.searchParams.get('scene_id'), at: '2026-10-01T08:00:00Z' },
-      { seq: 2, role: 'being', content: '主题、布局与 **输入框** 都应正常。', scene_id: url.searchParams.get('scene_id'), at: '2026-10-01T08:00:01Z' },
+      { seq: 2, role: 'being', content: '主题、布局与 **输入框** 都应正常。\n\n'.repeat(30) + '最后一段仍可见。', scene_id: url.searchParams.get('scene_id'), at: '2026-10-01T08:00:01Z' },
     ] } });
     return route.fulfill({ json: { being_name: '样式测试', model: 'fixture', sbs_enabled: false, presets: [] } });
   });
@@ -30,7 +30,7 @@ try {
   await page.goto(origin);
   const frame = page.frameLocator('iframe');
   try {
-    await frame.getByRole('textbox', { name: 'message input' }).waitFor({ timeout: 15000 });
+    await frame.getByRole('textbox', { name: '消息输入框' }).waitFor({ timeout: 15000 });
   } catch (error) {
     console.error({ errors, frames: page.frames().map(frame => frame.url()), body: await page.locator('body').innerText() });
     throw error;
@@ -44,12 +44,18 @@ try {
       await page.getByRole('group', { name: '外观主题' }).getByRole('button', { name: label, exact: true }).click();
       await navigation.getByRole('button', { name: '对话', exact: true }).click();
       await frame.locator(`html[data-theme="${theme}"]`).waitFor();
-      await frame.getByRole('textbox', { name: 'message input' }).fill('保留编辑器布局');
+      await frame.getByRole('textbox', { name: '消息输入框' }).fill('保留编辑器布局');
       assert.equal(await page.locator('html').getAttribute('data-theme'), theme);
       assert.equal(await page.locator('.web-app').evaluate(el => el.scrollWidth > el.clientWidth + 1), false);
       assert.equal(await frame.locator('#input-area').evaluate(el => el.scrollWidth > el.clientWidth + 1), false);
-      const composer = await frame.locator('#input-area').boundingBox();
-      assert.ok(composer.width > 200 && composer.height >= 80, 'The shared editor styles must be loaded');
+      const composer = await frame.locator('#input-area').evaluate(el => el.getBoundingClientRect().toJSON());
+      const chatHeight = await frame.locator('html').evaluate(el => el.clientHeight);
+      assert.ok(composer.width > 200 && composer.bottom < chatHeight, 'The composer fits inside the chat frame');
+      const lastMessage = await frame.locator('#messages').evaluate(el => {
+        el.scrollTop = el.scrollHeight;
+        return el.querySelector('.message.being .content').getBoundingClientRect().bottom;
+      });
+      assert.ok(lastMessage <= composer.top, 'The final reply is visible above the composer at the bottom of the transcript');
       await page.screenshot({ path: `test-results/web-styles-${width}-${theme}.png` });
     }
   }

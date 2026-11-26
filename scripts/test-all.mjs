@@ -24,14 +24,14 @@ async function persist() {
     `Background lifecycle: ${report.background.enabled ? 'included in desktop E2E (see step outcome)' : 'SKIPPED — ' + report.background.reason}\n\n` +
     '| Step | Result | Seconds |\n| --- | --- | ---: |\n' + report.steps.map(step => `| ${step.name} | ${step.status} | ${step.seconds} |`).join('\n') + '\n');
 }
-async function step(name, file, args, cwd = process.cwd()) {
+async function step(name, file, args, cwd = process.cwd(), env = process.env) {
   console.log(`\n[${name}]`);
   const start = Date.now();
   const log = createWriteStream(path.join(directory, name + '.log'));
   let result;
   try {
     result = await new Promise((resolve, reject) => {
-      const child = spawn(file, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+      const child = spawn(file, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env });
       for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { log.write(data); process.stdout.write(data); });
       child.once('error', reject);
       child.once('close', (code, signal) => resolve({ code, signal }));
@@ -66,6 +66,10 @@ try {
   // Native Windows unit tests exercise the bundled Portal from resources/.
   // Build it before Vitest; a clean CI checkout has no generated binary yet.
   if (!flags.has('--reuse-package')) await npm('build-portal', ['run', 'build:portal']);
+  if (process.platform === 'win32') {
+    await step('sandbox-cancellation-native', process.execPath, ['tests/windows-sandbox-cancellation-native.mjs']);
+    await npm('portal-permissions-native', ['run', 'test:portal-permissions']);
+  }
   await npm('unit', ['test', '--', '--reporter=default', '--reporter=junit', '--outputFile.junit=test-results/unit.xml']);
   await npm('menu-keyboard', ['run', 'test:menu-keyboard']);
   await npm('taskbar-icons', ['run', 'test:taskbar-icons']);
@@ -86,14 +90,17 @@ try {
   await npm('chat-scene-loading', ['run', 'test:chat-scene-loading']);
   await npm('chat-render-performance', ['run', 'test:chat-render-performance']);
   await npm('settings-navigation', ['run', 'test:settings-navigation']);
+  await step('connectors-network', process.execPath, ['tests/connectors-network-electron.mjs']);
   await step('connectors-navigation', process.execPath, ['tests/connectors-navigation.mjs']);
+  await step('connectors-local-kit', process.execPath, ['tests/connectors-local-kit.mjs']);
+  await step('connectors-credentials', process.execPath, ['tests/connectors-credentials.mjs']);
   await step('workspace-motion', process.execPath, ['tests/workspace-motion.mjs']);
   await step('panel-layout-performance', process.execPath, ['tests/panel-layout-performance.mjs']);
   await step('chat-resize-performance', process.execPath, ['tests/chat-resize-performance.mjs']);
   await step('being-panel-retention', process.execPath, ['tests/being-panel-retention.mjs']);
   // Some engine tests share process-level environment variables; serialize Rust tests.
   const rustArgs = ['test', '--locked', '-p', 'heart-portal', '--', '--test-threads=1'];
-  await step('portal-rust', 'cargo', rustArgs, source);
+  await step('portal-rust', 'cargo', rustArgs, source, { ...process.env, HEART_PORTAL_RUNTIME_DIR: path.resolve('resources/portal-runtime') });
   if (!flags.has('--reuse-package')) {
     await npm('package', ['run', 'package']);
   }

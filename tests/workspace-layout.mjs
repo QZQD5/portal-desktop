@@ -56,6 +56,7 @@ const bundle = await build({ plugins:[browserAssets(),{name:'preview-chat-origin
     ? {routes:[{id:'self-hosted',name:'本机模型线路',base_url:'https://example.invalid/v1',has_key:true}]}
     : {models:[{id:'glm-5.3',name:'GLM 5.3',context:262144,reasoning:true,tool_call:true},{id:'fixture-next',name:'示例备用模型'}]}});
   app.api.subagentConfig = async () => ({provider:'openai',model:'local-fixture',thinking:'medium'});
+  app.api.subagentStatus = async () => ({enabled:true,inheritModel:false,configured:true,provider:'openai',model:'local-fixture',thinking:'medium',apiKeyConfigured:true,ready:true,health:'ok',message:''});
   window.fixtureApp = app;
   window.fixtureDsh = dshRuntime;
   createRoot(document.getElementById('root')).render(<App model={app} />);
@@ -94,6 +95,14 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   if (museOnly) await page.locator('#chat-frame').waitFor();
   else await page.getByRole('heading',{name:'从一个想法开始'}).waitFor();
+  const headerFade = await page.locator('#chat-view > .topbar').evaluate(node => {
+    const fade = getComputedStyle(node, '::before');
+    return { background: fade.backgroundImage, edges: [fade.left, fade.right],
+      corner: fade.borderTopRightRadius, panelCorner: getComputedStyle(node).borderTopRightRadius };
+  });
+  assert.match(headerFade.background, /linear-gradient/, 'The header fades into scrolling messages');
+  assert.deepEqual(headerFade.edges, ['0px','0px'], 'The fade reaches both edges of the chat pane');
+  assert.equal(headerFade.corner, headerFade.panelCorner, 'The fade follows the rounded header');
   assert.equal(await page.locator('#chat-session-panel').count(),0);
   await mkdir('test-results',{recursive:true});
   if (museOnly) {
@@ -371,11 +380,11 @@ try {
   await page.getByRole('dialog',{name:'SBS 自主活动'}).waitFor();
   assert.equal(await page.locator('#being-info').isVisible(), false, 'Name opens SBS settings, not the profile');
   await page.getByRole('button',{name:'关闭 SBS 设置'}).click();
-  await page.getByRole('button',{name:'资料库',exact:true}).click();
+  await page.getByRole('button',{name:'资料',exact:true}).click();
   assert.equal(await page.locator('#toggle-being-info').getAttribute('aria-expanded'), 'true');
   const info = page.locator('#being-info');
   assert.deepEqual(await info.getByRole('tab').allTextContents(), ['详情', '资料库', '电脑']);
-  assert.equal(await info.getByRole('tab',{name:'资料库',exact:true}).getAttribute('aria-selected'), 'true');
+  assert.equal(await info.getByRole('tab',{name:'详情',exact:true}).getAttribute('aria-selected'), 'true');
   await info.getByRole('tab',{name:'详情',exact:true}).press('ArrowRight');
   assert.equal(await info.getByRole('tab',{name:'资料库',exact:true}).getAttribute('aria-selected'), 'true');
   await info.getByRole('tab',{name:'资料库',exact:true}).press('Home');
@@ -392,8 +401,8 @@ try {
     assert.equal(await info.isVisible(), false);
     assert.equal(await page.locator('#toggle-being-info').evaluate(node=>node===document.activeElement), true);
     assert.equal(await page.locator('#conversation-name').isVisible(), true);
-    await page.getByRole('button',{name:'资料库',exact:true}).click();
-    assert.equal(await info.getByRole('tab',{name:'资料库',exact:true}).getAttribute('aria-selected'), 'true');
+    await page.getByRole('button',{name:'资料',exact:true}).click();
+    assert.equal(await info.getByRole('tab',{name:'详情',exact:true}).getAttribute('aria-selected'), 'true');
     await info.getByRole('tab',{name:'电脑',exact:true}).click();
     await info.getByText('请在桌面客户端连接 Being Home。',{exact:true}).waitFor();
     assert.equal(await info.evaluate(node=>node.scrollWidth>node.clientWidth), false);
@@ -409,7 +418,7 @@ try {
   await page.locator('#toggle-being-info').click();
   assert.equal(await info.isVisible(), false);
   await page.locator('#toggle-being-info').click();
-  assert.equal(await info.getByRole('tab',{name:'资料库',exact:true}).getAttribute('aria-selected'), 'true');
+  assert.equal(await info.getByRole('tab',{name:'详情',exact:true}).getAttribute('aria-selected'), 'true');
   await info.getByRole('tab',{name:'详情',exact:true}).click();
   const infoDivider = page.getByRole('separator',{name:'调整 Being 信息宽度'});
   const infoHandle = await infoDivider.boundingBox();
@@ -430,6 +439,8 @@ try {
   const mainChat = await page.locator('#chat-view').boundingBox();
   const mainInfo = await info.boundingBox();
   const mainRail = await rail.boundingBox();
+  const mainToolbar = await page.locator('#chat-view > .topbar').boundingBox();
+  assert.equal(mainToolbar.height, 72, 'The desktop floating header uses the reviewed height');
   assert.equal(mainChat.y, 8, 'Chat keeps the shared top gutter');
   assert.equal(mainInfo.y, mainChat.y, 'Auxiliary panes share the chat top edge');
   assert.equal(mainRail.x + mainRail.width, mainChat.x, 'Navigation joins the content without an extra gutter');
@@ -473,7 +484,7 @@ try {
     const identity = await page.locator('.pair-name').boundingBox();
     assert.ok(identity.x + identity.width <= actions.x, 'Split chat identity stays clear of its actions');
     assert.equal(toolbar.y, c.y);
-    assert.equal(toolbar.height, 88, 'Every chat width keeps the shared floating header');
+    assert.equal(toolbar.height, mainToolbar.height, 'Every chat width keeps the shared floating header');
     assert.ok(sceneControl.x + sceneControl.width <= actions.x, 'Scene picker and chat actions must not overlap');
     assert.ok(actions.x + actions.width <= toolbar.x + toolbar.width);
   }
@@ -484,7 +495,7 @@ try {
   assert.ok(await page.locator('#chat-frame').evaluate(node => node.getBoundingClientRect().bottom <= innerHeight));
   await page.waitForFunction(() => { const frame = document.getElementById('chat-frame'); return !frame.src || Math.abs(frame.contentWindow.innerHeight - frame.clientHeight) < 1; });
   await page.screenshot({animations:'disabled',path:'test-results/workspace-split.png'});
-  assert.equal(await page.getByRole('button',{name:'资料库',exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:'资料',exact:true}).count(),0);
   const divider = page.getByRole('separator',{name:'调整并排对话宽度'});
   const splitHandle = await divider.boundingBox();
   const splitChat = await page.locator('#chat-view').boundingBox();
@@ -499,7 +510,7 @@ try {
   await page.getByRole('button',{name:'回到对话',exact:true}).click();
   await page.getByRole('button',{name:'关闭 Being 信息',exact:true}).click();
   assert.equal(await page.locator('#being-info').isVisible(),false);
-  await page.getByRole('button',{name:'资料库',exact:true}).click();
+  await page.getByRole('button',{name:'资料',exact:true}).click();
   assert.equal(await page.locator('#being-info').isVisible(),true);
   assert.equal(await page.locator('.topbar #chat-scene-indicator').count(), 0, 'Scene navigation lives in the rail');
   const chatBeforeHover = await page.locator('#chat-view').boundingBox();
@@ -538,6 +549,22 @@ try {
     await page.setViewportSize({width,height:746});
     await assertPinnedLayout();
   }
+  await page.evaluate(() => {
+    const app = window.fixtureApp;
+    app.chatSessionCreateRequest++;
+    app.changed();
+  });
+  const sceneEditor = page.getByRole('dialog', {name:'新建场景'});
+  await sceneEditor.waitFor();
+  assert.equal(await sceneEditor.evaluate(el => el.scrollHeight - el.clientHeight), 0);
+  for (const name of ['取消', '创建并进入']) {
+    assert.equal(await sceneEditor.getByRole('button', {name, exact:true}).evaluate(el => {
+      const label = document.createRange();
+      label.selectNodeContents(el);
+      return label.getClientRects().length;
+    }), 1, `${name} stays on one line inside the scene dialog`);
+  }
+  await sceneEditor.getByRole('button', {name:'取消', exact:true}).click();
   await page.setViewportSize({width:1440,height:960});
 
   assert.equal(await page.locator('#chat-session-panel .chat-session-titlebar').getByRole('button',{name:'收起场景列表',exact:true}).count(), 1, 'Collapse belongs to the list header');
@@ -576,7 +603,6 @@ try {
   assert.ok(statusBounds.y >= nameBounds.y + nameBounds.height, 'SBS activity sits beneath the name');
   assert.equal(await page.locator('#chat-view > .topbar').evaluate(node=>getComputedStyle(node).getPropertyValue('-webkit-app-region')), 'drag', 'Header space remains a native window drag region');
   assert.equal(await sbsIdentity.evaluate(node=>getComputedStyle(node).getPropertyValue('-webkit-app-region')), 'no-drag', 'Identity remains clickable inside the drag region');
-  assert.match(await page.locator('#chat-view > .topbar').evaluate(node=>getComputedStyle(node).backgroundImage), /linear-gradient/, 'A fading mask separates controls from scrolling messages');
   await page.evaluate(()=>{const app=window.fixtureApp;app.chatSbsOrigin=undefined;app.chatSbsPhase=undefined;app.changed();});
   await page.waitForFunction(()=>Number.parseFloat(getComputedStyle(document.querySelector('#chat-frame').contentDocument.querySelector('#messages')).paddingTop) >= 88);
   const retainedFrame = await page.locator('#chat-frame').elementHandle();

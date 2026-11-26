@@ -1,3 +1,4 @@
+import { CHAT_SCENE_ACTIVITY_LABELS, type ChatSceneActivity } from '../../../shared/types';
 import { ChatEventDecoder } from './sse';
 import { withComposerCommandContext, usesIntelligentUICommand } from './composer-command-context';
 import { newToolActivity, completeToolActivity } from '../models/tool-activity';
@@ -10,7 +11,7 @@ import { createSceneRuntime } from "./scene-runtime";
 import { HistoryCache, normalizeHistoryRows } from "./history-cache";
 import { chatHistoryLimit } from '../../../shared/chat-history';
 import { inCurrentScene, messageScene, sceneItems, sceneTransitionNotice, stripSceneTransition, type MessageScene } from "../models/scenes";
-import type { ChatRuntime, ChatState, RuntimeOptions } from "../models/chat";
+import type { ChatRuntime, ChatState, Message, RuntimeOptions } from "../models/chat";
 
 /**
  * Loom's streaming, replay and history protocol, independent of rendering.
@@ -246,6 +247,13 @@ function createStreamRuntime(state: any, options: any): any {
   let replayingSettledReply = false;
   let replayingInitialEvents = false;
   let replayRunStartedAt: number | undefined;
+  let lastServerError: string | undefined;
+  function repeatedServerError(data: any) {
+    const message = data.message || "unknown error";
+    if (lastServerError === message) return true;
+    lastServerError = message;
+    return false;
+  }
   function setStreamScene(scene: any) {
     state.activeScene = {
       ...scene,
@@ -272,20 +280,22 @@ function createStreamRuntime(state: any, options: any): any {
     const reasoning = (type === "thinking" || type === "reasoning") &&
       typeof (data.text || data.delta?.text || data.delta) === "string" &&
       (data.text || data.delta?.text || data.delta).trim();
-    if (!streamMessage || !streamText || (type !== "tool_use" && !reasoning)) return;
+    if (!streamText || (type !== "tool_use" && !reasoning)) return;
     if (renderTimer) {
       cancelAnimationFrame(renderTimer);
       renderTimer = null;
     }
-    const visible = cleanContent(streamText);
-    if (visible) {
-      updateMessage(streamMessage, visible);
-      streamMessage.interim = true;
-      progressBubbles.push({ message: streamMessage, text: streamText });
-      setMessageStreaming(streamMessage, false);
-      noteLocalEcho("being", streamText, state.activeScene, streamMessage);
-    } else removeMessage(streamMessage);
-    streamReplyPrefix += streamText;
+    if (streamMessage) {
+      const visible = cleanContent(streamText, true);
+      if (visible) {
+        updateMessage(streamMessage, visible);
+        streamMessage.interim = true;
+        progressBubbles.push({ message: streamMessage, text: streamText });
+        setMessageStreaming(streamMessage, false);
+        noteLocalEcho("being", streamText, state.activeScene, streamMessage);
+        streamReplyPrefix += streamText;
+      } else removeMessage(streamMessage);
+    }
     streamMessage = null;
     streamText = "";
   }
@@ -300,14 +310,16 @@ function createStreamRuntime(state: any, options: any): any {
     state.items = state.items.filter((item: any) => item !== message);
     changed();
   }
-  function moveRun() {
-    // The aggregate callback summary stays at its original position. Moving it
-    // on each continuation can jump past newer room messages and history anchors.
-    if (currentRun?.autonomousOrigin) return;
-    if (currentRun && !currentRun.end && state.items.at(-1) !== currentRun) {
-      state.items = state.items.filter((item: any) => item !== currentRun);
-      state.items.push(currentRun);
-    }
+  // Read-only projection shared by the transcript and scene list. Transport,
+  // history and queue ownership remain with their existing event handlers.
+  function activeActivity(): ChatSceneActivity | null {
+    if (replayTransportOnly && !pendingReply) return null;
+    if (pendingRecovery) return "reconnecting";
+    if (pendingReply && (pendingReply.phase !== "processing" || !isStreaming))
+      return pendingReply.phase === "queued" ? "queued" : "waiting";
+    if (!isStreaming || replyRunSettled) return null;
+    if (livePhase === "tool" && actionLog.some(entry => entry.type === "tool" && !entry.done && !entry.error)) return "working";
+    return livePhase === "text" ? "replying" : "thinking";
   }
   function updateRun(finished = false) {
     if (replayingSettledReply) return;
@@ -335,13 +347,13 @@ function createStreamRuntime(state: any, options: any): any {
       replayRunStartedAt = undefined;
     }
     const run = currentRun;
-    moveRun();
     if (actionLog.length || !run.entries.length || isStreaming)
       run.entries = actionLog.map((entry) => ({ ...entry }));
-    const waiting = (pendingReply && pendingReply.phase !== "processing") || (!isStreaming && Boolean(pendingRecovery || pendingReply));
+    const activity = activeActivity();
+    const waiting = activity === "queued" || activity === "waiting" || activity === "reconnecting";
     const lastTool = [...run.entries]
       .reverse()
-      .find((entry) => entry.type === "tool" && !entry.done);
+      .find((entry) => entry.type === "tool" && !entry.done && !entry.error);
     run.waitingForReply = !!pendingReply && waiting;
     run.arg = tuiCurrentArg;
     run.hint = tuiHintText;
@@ -362,20 +374,12 @@ function createStreamRuntime(state: any, options: any): any {
       run.hint = "";
       run.status = run.outcome;
     } else {
-      run.status = waiting
-        ? pendingReply ? pendingReply.phase === "queued" ? "queued" : "waiting" : "reconnecting"
-        : livePhase === "tool" && lastTool ? "working" : livePhase === "text" ? "replying" : "thinking";
-      run.label = waiting
-        ? pendingReply ? pendingReply.phase === "queued"
-          ? pendingReply.interrupted && !pendingReply.autonomousOrigin ? '消息已接收，正在调整回复方向…' : `${pendingReply.autonomousOrigin === 'callback' ? 'SBS 自主回调进行中；' : pendingReply.autonomousOrigin ? 'SBS 自主处理进行中；' : ''}消息已接收，正在切换到当前对话…`
-          : "等待最终回复" : "正在恢复连接"
-        : livePhase === "tool" && lastTool
-          ? `正在运行 ${lastTool.name || "工具"}`
-          : livePhase === "text"
-            ? "正在回复"
-            : tuiCurrentState && tuiCurrentState !== "在思考"
-              ? tuiCurrentState
-              : "思考中";
+      const status = activity || "thinking";
+      run.status = status;
+      run.label = status === "queued" ? "消息已接收"
+        : status === "waiting" && pendingReply?.interrupted ? "等待接续回复"
+        : status === "working" && lastTool ? `正在运行 ${lastTool.name || "工具"}`
+        : CHAT_SCENE_ACTIVITY_LABELS[status];
     }
   }
   // Config（_pathBase / API_URL / LOOM_TOKEN / RELAY_SECRET / apiUrl 见文件顶部预取 script）
@@ -818,9 +822,10 @@ function createStreamRuntime(state: any, options: any): any {
     timestamp: any = null,
     isoTime: any = null,
     scene: any = role === "being" ? state.activeScene : state.currentScene,
+    statusMessageId?: string,
   ) {
     if (disposed) return null;
-    if (!streaming && role !== "system") text = cleanContent(role === "user" ? stripSceneTransition(stripClientMessageContext(text)) : text);
+    if (!streaming && role !== "system") text = visibleMessageText(role, text);
     if (!text && !streaming) return null; // skip empty after cleaning
 
     const ts = timestamp || formatTime();
@@ -870,9 +875,9 @@ function createStreamRuntime(state: any, options: any): any {
       createdAt: msgTime || undefined,
       label,
       consecutive,
+      statusMessageId,
     };
     state.items.push(message);
-    moveRun();
     changed();
     return message;
   }
@@ -936,7 +941,7 @@ function createStreamRuntime(state: any, options: any): any {
       kind: "separator",
       id: `marker-${options.nextId()}`,
       marker: true,
-      handoffMarker: /^\[breath yielded/i.test(text || ''),
+      handoffMarker: /^\[breath (?:yielded|superseded)/i.test(text || ''),
       stopMarker: /^\[breath interrupted/i.test(text || ''),
       text: `· ${breathMarkerLabel(text)} · ${timestamp || formatTime()} ·`,
     };
@@ -952,22 +957,22 @@ function createStreamRuntime(state: any, options: any): any {
   /** Both SSE and replay share one visual writer. After the first bubble,
    * token bursts update the store only once per animation frame. */
   function appendStreamText(text: string) {
-    removeThinkingIndicator();
-    tuiClear();
-    // A final answer can resume after the waiting indicators already cleared.
-    // Refresh the phase once without copying the tool log for every token.
-    if (currentRun?.status !== 'replying') updateRun();
     streamText += text;
     if (!streamMessage) {
-      const visible = cleanContent(streamText);
-      if (visible) streamMessage = addMessage("being", visible, true);
+      const visible = cleanContent(streamText, true);
+      if (!visible) return;
+      livePhase = "text";
+      removeThinkingIndicator();
+      tuiClear();
+      if (currentRun?.status !== 'replying') updateRun();
+      streamMessage = addMessage("being", visible, true);
     } else if (!renderTimer) {
       const rafEpoch = writerEpoch;
       renderTimer = requestAnimationFrame(() => {
         renderTimer = null;
         if (rafEpoch !== writerEpoch) return;
         if (streamMessage && streamText) {
-          const visible = cleanContent(streamText);
+          const visible = cleanContent(streamText, true);
           if (visible) updateMessage(streamMessage, visible);
         }
       });
@@ -1002,11 +1007,15 @@ function createStreamRuntime(state: any, options: any): any {
         date.getDate() === today.getDate()) return time;
     return `${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日 ${time}`;
   }
+  function visibleMessageText(role: string, text: string) {
+    return role === "user" ? stripSceneTransition(stripClientMessageContext(text)).trim() : cleanContent(text);
+  }
+
   // Filter out DSML/tool_call raw content
-  function cleanContent(text: any) {
+  function cleanContent(text: any, streaming = false) {
     if (!text) return "";
     const fences: any[] = [];
-    text = text.replace(/```[\s\S]*?```/g, (block: any) => {
+    text = text.replace(streaming ? /```[\s\S]*?(?:```|$)/g : /```[\s\S]*?```/g, (block: any) => {
       const key = `@@FENCE_${fences.length}@@`;
       fences.push(block);
       return key;
@@ -1015,7 +1024,17 @@ function createStreamRuntime(state: any, options: any): any {
     const rawToolJson =
       /"name"\s*:\s*"(?:act|remember|learn)"\s*,\s*"args"\s*:/;
     if (/^[\[{]/.test(trimmed) && rawToolJson.test(trimmed)) return "";
+    if (streaming) {
+      // A tool marker can begin with a delta containing only "<". Hold the
+      // ambiguous suffix until the next token identifies it as markup or prose.
+      text = text.replace(/<[^<\n]*$/, (tail: string) => {
+        const prefix = tail.toLowerCase().replaceAll("｜", "|").replace(/^<\//, "<");
+        return ["<|dsml|", "<||dsml||", "<tool_calls", "<tool_use", "<tool_result", "<system"]
+          .some(marker => marker.startsWith(prefix)) ? "" : tail;
+      });
+    }
     // Remove DSML lines — both half-width | and full-width ｜
+    text = text.replace(/<\/?[|｜]+ *DSML *[|｜]+[^\n]*/g, "");
     text = text.replace(/^.*[|｜] *DSML *[|｜].*$/gm, "");
     // Remove raw tool_calls XML blocks (both formats)
     text = text.replace(
@@ -1213,10 +1232,10 @@ function createStreamRuntime(state: any, options: any): any {
 
   let fetchRetryMessage: any = null;
 
-  function showFetchRetryStatus() {
+  function showFetchRetryStatus(target?: Message) {
     setStatus("reconnecting");
     if (!fetchRetryMessage) {
-      const message = addMessage("system", "连接中，正在重试...");
+      const message = addMessageNotice("连接中，正在重试...", target);
       fetchRetryMessage = message;
     }
   }
@@ -1228,25 +1247,27 @@ function createStreamRuntime(state: any, options: any): any {
     }
   }
 
-  function addNetworkFailureMessage(text: any, files: any, requestMessage: any, clientRequestId?: string) {
+  function addMessageNotice(text: string, target?: Message | null, scene = state.activeScene) {
+    const ownerScene = target ? { sceneId: target.sceneId, sceneLabel: target.sceneLabel, legacySceneId: target.legacySceneId } : scene;
+    return addMessage("system", text, false, undefined, undefined, ownerScene, target?.id);
+  }
+
+  function addNetworkFailureMessage(text: any, files: any, requestMessage: any, target?: Message | null, clientRequestId?: string) {
     const scene = { ...state.activeScene };
-    const message = addMessage("system", "⚠ 网络连接失败，请检查网络后重试", false, undefined, undefined, scene);
+    const message = addMessageNotice("⚠ 网络连接失败，请检查网络后重试", target, scene);
     message.retry = () => {
       if (state.currentScene.sceneId !== scene.sceneId) {
         message.text = "请切换回这条消息所属的场景后重试。"; changed(); return;
       }
       removeMessage(message);
-      return send(text, files, { isManualRetry: true, requestMessage, clientRequestId });
+      return send(text, files, { isManualRetry: true, requestMessage, queuedMessage: target, clientRequestId });
     };
     message.retryLabel = "重试";
     changed();
   }
 
   function addTimeoutRetryMessage() {
-    const message = addMessage(
-      "system",
-      "等了很久都没有新进展，可能是执行时间较长",
-    );
+    const message = addMessageNotice("等了很久都没有新进展，可能是执行时间较长", currentReplyBubble());
     message.retryLabel = "检查一下";
     message.retry = async () => {
       removeMessage(message);
@@ -1312,6 +1333,8 @@ function createStreamRuntime(state: any, options: any): any {
   }
 
   function markProgress(type: any, data: any) {
+    if (type === "meta" && (data.continuation === true ||
+        (data.stream_id && data.stream_id !== currentStreamId))) lastServerError = undefined;
     if (type === "meta") showContinuationMarker(data);
     if (!PROGRESS_EVENTS.has(type)) return;
     const active = type !== "message_stop" && type !== "error";
@@ -1320,6 +1343,7 @@ function createStreamRuntime(state: any, options: any): any {
       if (type === "content_block_delta" && !data?.delta?.text) return;
       if ((type === "thinking" || type === "reasoning") &&
           !(data?.text || data?.delta?.text || (typeof data?.delta === "string" && data.delta))) return;
+      lastServerError = undefined;
       replayTransportOnly = false;
       autonomousHandedOff = false;
       if (currentRun?.end) {
@@ -1332,6 +1356,7 @@ function createStreamRuntime(state: any, options: any): any {
           currentRun.outcome = undefined;
           currentRun.status = undefined;
           currentRun.waitingForReply = false;
+          currentRun.replyConfirmed = false;
         } else {
           actionLog = [];
           currentRun = null;
@@ -1356,8 +1381,7 @@ function createStreamRuntime(state: any, options: any): any {
     } else if (type === "tool_result") {
       livePhase = "reasoning";
       livePendingTool = null;
-    } else if (type === "content_block_delta") livePhase = "text";
-    else if (type === "thinking" || type === "reasoning")
+    } else if (type === "thinking" || type === "reasoning")
       livePhase = "reasoning";
   }
 
@@ -1721,6 +1745,8 @@ function createStreamRuntime(state: any, options: any): any {
             if (myEpoch !== writerEpoch) continue;
             traceStreamEvent('sse', eventType, data, liveSeq);
             if (options.routeEvent?.(eventType, data)) continue;
+            // Ignore a repeated terminal error before it moves the run again.
+            if (eventType === "error" && repeatedServerError(data)) continue;
             splitStreamProgress(eventType, data);
             markProgress(eventType, data);
             if (["content_block_delta", "thinking", "reasoning", "tool_use", "tool_result", "message_stop", "error"].includes(eventType)) sawSceneEvent = true;
@@ -1778,16 +1804,7 @@ function createStreamRuntime(state: any, options: any): any {
               }
               removeThinkingIndicator();
               if (data.persisted) acceptPersisted(data);
-              if (streamMessage) {
-                setMessageStreaming(streamMessage, false);
-                const visibleText = cleanContent(streamText);
-                if (visibleText) updateMessage(streamMessage, visibleText);
-                else if (streamMessage.persistedText || streamMessage.historySeq) {
-                  // Persistence already bound (often via preceding meta.persisted).
-                  // Keep the bubble even when this stop frame carries no fresh tokens.
-                  if (streamMessage.persistedText) streamMessage.text = streamMessage.persistedText;
-                } else removeMessage(streamMessage);
-              }
+              finalizePartialBubble(true);
               noteStreamEcho();
               settleReplyBoundary();
               const persistedSeq = Number(data.persisted?.seq) || 0;
@@ -1807,7 +1824,8 @@ function createStreamRuntime(state: any, options: any): any {
               pendingReply = null;
               stopCatchUpWatcher();
               removeThinkingIndicator();
-              addMessage("system", "⚠ " + (data.message || "unknown error"));
+              finalizePartialBubble();
+              addMessageNotice("⚠ " + (data.message || "回复失败"), currentReplyBubble());
               isStreaming = false;
               setStatus("error");
               tuiClear();
@@ -1836,16 +1854,7 @@ function createStreamRuntime(state: any, options: any): any {
           renderTimer = null;
         }
         removeThinkingIndicator();
-        const visibleText = cleanContent(streamText);
-        if (streamMessage && visibleText) {
-          setMessageStreaming(streamMessage, false);
-          updateMessage(streamMessage, visibleText);
-        } else if (streamMessage) {
-          removeMessage(streamMessage);
-          streamMessage = null;
-        } else if (visibleText) {
-          streamMessage = addMessage("being", visibleText);
-        }
+        finalizePartialBubble(true);
         // EOF can finalize a reply without message_stop. Retain its echo before
         // releasing the live scene so a later history read does not append it again.
         noteStreamEcho();
@@ -1953,11 +1962,12 @@ function createStreamRuntime(state: any, options: any): any {
     let spliceMsg = (text || "").trim();
     if (!spliceMsg && !files.length) return;
     timedOutReply = null;
+    let localMessage = sendOptions.queuedMessage;
     let requestMessage: string = sendOptions.requestMessage;
     if (!sendOptions.isManualRetry) {
       spliceMsg = options.prepareMessage?.(spliceMsg || `[${files.length} file(s)]`) ?? spliceMsg;
       requestMessage = stripLocalFileContext(withComposerCommandContext((sendOptions.requestMessage ?? spliceMsg) || `[${files.length} file(s)]`, !!sendOptions.uiAction || (!!state.intelligentUIEnabled && (sendOptions.intelligentUI ?? state.intelligentUIForMessage)), sendOptions.uiSnapshot ?? state.intelligentUISnapshots?.[state.currentScene.sceneId || 'global'], sendOptions.uiAction));
-      const localMessage = ensureUserMessage(sendOptions.queuedMessage, spliceMsg || `[${files.length} file(s)]`);
+      localMessage = ensureUserMessage(sendOptions.queuedMessage, spliceMsg || `[${files.length} file(s)]`);
       noteLocalEcho("user", requestMessage, state.currentScene, localMessage, [spliceMsg]);
       if (!sendOptions.uiAction && !sendOptions.queuedMessage) clearComposer();
     }
@@ -1985,7 +1995,7 @@ function createStreamRuntime(state: any, options: any): any {
     } catch (e: any) {
       if (sendOptions.attachmentDelivery) await sendOptions.attachmentDelivery('unknown');
       console.warn("splice send failed:", e);
-      addMessage("system", "⚠️ 发送失败，稍后重试");
+      if (!sendOptions.attachmentDelivery) addMessageNotice("⚠ 发送结果待确认，请核对历史", localMessage);
       return;
     }
     if (sendOptions.attachmentDelivery) await sendOptions.attachmentDelivery(res.ok ? 'accepted' : res.status >= 500 ? 'unknown' : 'failed');
@@ -2000,6 +2010,7 @@ function createStreamRuntime(state: any, options: any): any {
     if (res.status === 202) {
       // Heart accepted this input for splice/yield. The Being decides whether
       // to resume, switch scene or delegate; 202 is not task completion.
+      res.body?.cancel().catch(() => {});
       updateSendButton();
       startCatchUpWatcher();
       return;
@@ -2014,12 +2025,12 @@ function createStreamRuntime(state: any, options: any): any {
       showThinkingIndicator();
       isStreaming = true;
       updateSendButton();
-      await driveChatStream(res, spliceMsg, files, requestMessage, clientRequestId, !!sendOptions.attachmentDelivery);
+      await driveChatStream(res, spliceMsg, files, requestMessage, !!sendOptions.attachmentDelivery, localMessage, clientRequestId);
       return;
     }
     // 非 200/202：主动排空 body，别让连接挂着
     res.body?.cancel().catch(() => {});
-    addMessage("system", "⚠️ 发送失败，稍后重试");
+    if (!sendOptions.attachmentDelivery) addMessageNotice("⚠ 服务暂时无法接收消息", localMessage);
   }
 
   async function send(text: any, filesOverride: any = null, sendOptions: any = {}) {
@@ -2046,6 +2057,14 @@ function createStreamRuntime(state: any, options: any): any {
       await spliceSend(text, filesOverride || [...pendingFiles], sendOptions, clientRequestId);
       return;
     }
+    // A new turn supersedes the previous terminal activity marker. Keep the
+    // completed run in the transcript, but stop exposing its error/timeout/
+    // stopped state as the live scene status while the new request starts.
+    if (currentRun?.end) {
+      currentRun = null;
+      actionLogClear();
+      changed();
+    }
     const replyBaseline = new Set(state.items);
     const submittedAt = Date.now();
     const sendingScene = { ...state.currentScene };
@@ -2065,7 +2084,9 @@ function createStreamRuntime(state: any, options: any): any {
     // Recovery identities belong to one request. A failed new POST (or reader
     // before its first meta event) must not probe the previous completed turn.
     currentStreamId = lastStreamId = null;
+    lastServerError = undefined;
     replyRunSettled = false;
+    resetLiveProgress();
     pendingReply = { baseline: replyBaseline, submittedAt, phase: "processing" };
     timedOutReply = null;
     autonomousStream = false;
@@ -2073,8 +2094,9 @@ function createStreamRuntime(state: any, options: any): any {
     replayTransportOnly = false;
     setStreamScene(state.currentScene);
 
+    const localMessage = isManualRetry ? sendOptions.queuedMessage
+      : ensureUserMessage(sendOptions.queuedMessage, msg || `[${filesToSend.length} file(s)]`);
     if (!isManualRetry) {
-      const localMessage = ensureUserMessage(sendOptions.queuedMessage, msg || `[${filesToSend.length} file(s)]`);
       // Servers may persist the user body without the transport-only scene cue.
       noteLocalEcho("user", requestMessage || `[${filesToSend.length} file(s)]`, sendingScene, localMessage, [stripSceneTransition(stripClientMessageContext(requestMessage))]);
       if (!fromQueue) clearComposer();
@@ -2117,7 +2139,7 @@ function createStreamRuntime(state: any, options: any): any {
         {
           onRetry: async () => {
             removeThinkingIndicator();
-            showFetchRetryStatus();
+            showFetchRetryStatus(localMessage);
           },
         },
       );
@@ -2125,8 +2147,7 @@ function createStreamRuntime(state: any, options: any): any {
       if (sendOptions.attachmentDelivery) {
         await sendOptions.attachmentDelivery('unknown');
         pendingReply = null; removeThinkingIndicator(); tuiClear();
-        addMessage('system', '附件消息发送结果不确定，请先核对历史；不会自动重发。');
-      } else handleStreamError(e, msg, filesToSend, requestMessage, clientRequestId);
+      } else handleStreamError(e, msg, filesToSend, requestMessage, localMessage, clientRequestId);
       finalizeSendCleanup();
       return;
     }
@@ -2136,8 +2157,8 @@ function createStreamRuntime(state: any, options: any): any {
     setStatus("thinking");
 
     if (res.status === 202) {
-      try { await res.json(); } catch (_: any) {}
       // Accepted is not completed: release the POST reader, retain this scene's run.
+      res.body?.cancel().catch(() => {});
       pendingReply = { baseline: replyBaseline, submittedAt, phase: "queued", autonomousOrigin: interruptedOrigin };
       removeThinkingIndicator();
       tuiClear();
@@ -2149,8 +2170,8 @@ function createStreamRuntime(state: any, options: any): any {
     if (!res.ok) {
       pendingReply = null;
       stopCatchUpWatcher();
-      const err = await res.text();
-      addMessage("system", "⚠ " + err);
+      const error = await res.text().catch(() => '');
+      if (!sendOptions.attachmentDelivery) addMessageNotice("⚠ " + (error.trim() || "服务暂时无法接收消息"), localMessage);
       setStatus("error");
       removeThinkingIndicator();
       tuiClear();
@@ -2158,12 +2179,12 @@ function createStreamRuntime(state: any, options: any): any {
       return;
     }
 
-    await driveChatStream(res, msg, filesToSend, requestMessage, clientRequestId, !!sendOptions.attachmentDelivery);
+    await driveChatStream(res, msg, filesToSend, requestMessage, !!sendOptions.attachmentDelivery, localMessage, clientRequestId);
   }
 
   // 读取循环 + 统一的异常处理 + 统一的收尾。
   // send() 和 spliceSend() 都走这里，保证 isStreaming / 队列 / 按钮在任何路径上都能复位。
-  async function driveChatStream(res: any, msg: any, filesToSend: any, requestMessage: string, clientRequestId?: string, attachmentAccepted = false) {
+  async function driveChatStream(res: any, msg: any, filesToSend: any, requestMessage = msg, attachmentAccepted = false, requestBubble?: Message, clientRequestId?: string) {
     let handedOff = false;
     try {
       const result = await consumeChatStream(res);
@@ -2184,8 +2205,11 @@ function createStreamRuntime(state: any, options: any): any {
       }
       return result;
     } catch (e: any) {
-      if (attachmentAccepted) { addMessage('system', '附件消息已被接受，回复连接中断，请刷新历史查看后续回复。'); }
-      else handleStreamError(e, msg, filesToSend, requestMessage, clientRequestId);
+      if (attachmentAccepted) {
+        finalizePartialBubble();
+        addMessageNotice('⚠ 回复连接中断，请刷新历史查看后续回复。', currentReplyBubble());
+      }
+      else handleStreamError(e, msg, filesToSend, requestMessage, requestBubble, clientRequestId);
       return { outcome: "aborted", streamId: lastStreamId, localSeq: liveSeq };
     } finally {
       if (renderTimer) {
@@ -2200,21 +2224,26 @@ function createStreamRuntime(state: any, options: any): any {
   }
 
   // 把当前 streamMessage 上的流式内容固化下来（去掉光标、做最终 markdown 渲染）。
-  function finalizePartialBubble() {
-    if (!streamMessage) return;
-    setMessageStreaming(streamMessage, false);
-    const visibleText = cleanContent(streamText);
-    if (visibleText) updateMessage(streamMessage, visibleText);
-    else {
+  function finalizePartialBubble(completed = false) {
+    const visibleText = cleanContent(streamText, !completed);
+    if (streamMessage && (visibleText || streamMessage.persistedText || streamMessage.historySeq)) {
+      setMessageStreaming(streamMessage, false);
+      if (visibleText) updateMessage(streamMessage, visibleText);
+    } else if (streamMessage) {
       removeMessage(streamMessage);
       streamMessage = null;
-    }
+    } else if (completed && visibleText) streamMessage = addMessage("being", visibleText);
+  }
+
+  function currentReplyBubble(): Message | undefined {
+    const message = streamMessage || progressBubbles.at(-1)?.message;
+    if (message?.text && state.items.includes(message)) return message;
   }
 
   // 统一的流异常处理。注意它**总是**让调用方走 finalizeSendCleanup()：
   // 断线恢复路径靠 pendingRecovery 让 finalizeSendCleanup 跳过队列 flush，
   // 而不是靠"不收尾"——isStreaming 卡在 true 是这次修复要根除的东西。
-  function handleStreamError(e: any, msg: any, filesToSend: any, requestMessage: string, clientRequestId?: string) {
+  function handleStreamError(e: any, msg: any, filesToSend: any, requestMessage = msg, requestBubble?: Message, clientRequestId?: string) {
     pendingReply = null;
     stopCatchUpWatcher();
     clearFetchRetryStatus();
@@ -2242,12 +2271,13 @@ function createStreamRuntime(state: any, options: any): any {
         tuiClear();
       } else {
         // The POST may already have reached the Gateway if the response was lost.
-        addNetworkFailureMessage(msg, filesToSend, requestMessage, clientRequestId);
+        addNetworkFailureMessage(msg, filesToSend, requestMessage, requestBubble, clientRequestId);
         setStatus("error");
         tuiClear();
       }
     } else {
-      addMessage("system", "⚠ " + e.message);
+      finalizePartialBubble();
+      addMessageNotice("⚠ " + e.message, currentReplyBubble() || requestBubble);
       setStatus("error");
       tuiClear();
     }
@@ -2558,7 +2588,7 @@ function createStreamRuntime(state: any, options: any): any {
       for (const item of state.items) if (item.stopMarker) acceptStopMarker(item);
       if (!attempt.confirmed && sameTurn()) {
         const notice = stopNotice && stopNotice.streamId === targetStreamId ? stopNotice.message
-          : addMessage("system", "停止尚未确认，仍在接收回复");
+          : addMessageNotice("停止尚未确认，仍在接收回复", currentReplyBubble());
         stopNotice = { streamId: targetStreamId, message: notice };
         notice.notice = "stop";
         notice.statusRunId = targetRun?.id;
@@ -2621,8 +2651,9 @@ function createStreamRuntime(state: any, options: any): any {
   // 本地已经渲染、但还没被历史游标覆盖的消息。用于避免"本地回显 + 历史对账"渲染两遍。
   let localEchoes: any[] = [];
   const ECHO_SCENE_FALLBACK_MS = 2 * 60 * 1000;
-  function normalizeEcho(text: any) {
-    return (cleanContent(text || "") || "").replace(/\s+/g, " ").trim();
+  function normalizeEcho(text: any, role = "being") {
+    const body = visibleMessageText(role, text || "");
+    return role === "user" ? body.replace(/\r\n/g, "\n") : body.replace(/\s+/g, " ").trim();
   }
   function echoScene(echo: any) {
     return echo.message || echo.scene || {};
@@ -2645,10 +2676,10 @@ function createStreamRuntime(state: any, options: any): any {
       (!message.historySeq || message.historySeq === p.seq) && state.items.includes(message));
     const current = streamMessage && (!streamMessage.historySeq || streamMessage.historySeq === p.seq) ? streamMessage : null;
     const fragments = [...progress, ...(current ? [{ message: current, text: streamText }] : [])];
-    // A yielded partial can contain every speech fragment since the preceding
-    // stop, even when the last tool/reasoning event already released the bubble.
+    // Process speech and yielded partials can persist several tool-separated
+    // fragments together, even when the last event already released the bubble.
     // Keep the exact raw fragments until history verifies this seq's coverage.
-    if ((p.from === "partial" || (p.from === "final" && !current)) && fragments.length > 1) {
+    if ((p.from !== "final" || !current) && fragments.length > 1) {
       registerPersistedGroup(fragments, p);
       rememberPersisted(p.seq);
       return;
@@ -2715,6 +2746,10 @@ function createStreamRuntime(state: any, options: any): any {
     pendingPersistedGroups.delete(persisted.seq);
     const first = fragments[0].message;
     const members = new Set(fragments.map(fragment => fragment.message));
+    const fragmentIds = new Set(fragments.map(fragment => fragment.message.id));
+    for (const item of state.items) {
+      if (item.kind === 'message' && item.statusMessageId && fragmentIds.has(item.statusMessageId)) item.statusMessageId = first.id;
+    }
     for (const message of members) {
       // Detached references can still be touched by the pending animation/stop;
       // give them their identity too so they cannot register another local echo.
@@ -2751,8 +2786,11 @@ function createStreamRuntime(state: any, options: any): any {
       item.historySeq === Number(row.seq) && item.role === (row.role === "user" ? "user" : "being"));
     if (!message) return false;
     applyHistoryIdentity(message, historyIdentity(row));
-    message.persistedText = cleanContent(row.role === "user" ? stripSceneTransition(stripClientMessageContext(row.content)) : row.content);
-    if (!message.streaming) message.text = message.persistedText;
+    message.historyContentError = row.role !== 'user' && !row.content.trim() && !message.text.trim();
+    if (row.content.trim()) {
+      message.persistedText = visibleMessageText(row.role, row.content);
+      if (!message.streaming) message.text = message.persistedText;
+    }
     changed();
     return true;
   }
@@ -2762,7 +2800,7 @@ function createStreamRuntime(state: any, options: any): any {
     const localIndex = state.items.indexOf(message);
     const candidates = state.items.map((item: any, index: any) => ({ item, index })).filter(({ item, index }: any) =>
       index > localIndex && item !== message && item.kind === "message" && item.historySeq && !item.persistedStreamId &&
-      item.role === role && texts.includes(normalizeEcho(item.text)));
+      item.role === role && texts.includes(normalizeEcho(item.text, role)));
     const exact = [...candidates].reverse().find(({ item }: any) => echoScenesMatch(item, message || scene));
     if (exact) return exact.item;
     if (role !== "being" || !message) return null;
@@ -2778,10 +2816,10 @@ function createStreamRuntime(state: any, options: any): any {
     const owner = options.historyOwner?.();
     if (owner) return owner.noteLocalEcho(role, text, scene, localMessage, aliases);
     if (localMessage?.historySeq) return;
-    const t = normalizeEcho(text);
+    const t = normalizeEcho(text, role);
     if (!t) return;
-    const texts = [t, ...aliases.map(normalizeEcho).filter(Boolean)];
-    const message = localMessage || [...state.items].reverse().find(item => item.kind === "message" && item.role === role && item.sceneId === scene.sceneId && normalizeEcho(item.text) === t);
+    const texts = [t, ...aliases.map(alias => normalizeEcho(alias, role)).filter(Boolean)];
+    const message = localMessage || [...state.items].reverse().find(item => item.kind === "message" && item.role === role && item.sceneId === scene.sceneId && normalizeEcho(item.text, role) === t);
     // History can win the race against message_stop. In that order the normal
     // history -> local echo matcher has not been registered yet, so reconcile
     // the already-rendered persisted row back into the live bubble here.
@@ -2836,13 +2874,13 @@ function createStreamRuntime(state: any, options: any): any {
   }
   function consumeLocalEcho(role: any, text: any, scene: any, history: any) {
     if (role === 'user') {
-      text = stripSceneTransition(stripClientMessageContext(text || ''));
-      const ids = messageReferences(text);
+      const body = visibleMessageText(role, text || '');
+      const ids = messageReferences(body);
       if (ids.length) {
         const matching = state.items.filter((item: any) => item.kind === 'message' && item.role === 'user' && !item.historySeq &&
           item.attachmentViews?.some((view: any) => ids.includes(view.message_id)));
         if (matching.length) {
-          const item = matching[0]; item.text = text; item.queued = false;
+          const item = matching[0]; item.text = body; item.queued = false;
           item.attachmentViews = ids.flatMap(id => matching.flatMap((m: any) => m.attachmentViews || []).filter((v: any) => v.message_id === id)).filter((v: any, i: number, all: any[]) => all.findIndex(x => x.message_id === v.message_id) === i);
           applyHistoryIdentity(item, history);
           state.items = state.items.filter((other: any) => other === item || !matching.includes(other));
@@ -2850,7 +2888,7 @@ function createStreamRuntime(state: any, options: any): any {
         }
       }
     }
-    const t = normalizeEcho(text);
+    const t = normalizeEcho(text, role);
     if (!t) return false;
     const candidates = localEchoes.map((echo, index) => ({ echo, index })).filter(({ echo }) =>
       !echo.message?.historySeq && state.items.includes(echo.message) && echo.role === role && echo.texts.includes(t) &&
@@ -2892,6 +2930,10 @@ function createStreamRuntime(state: any, options: any): any {
   }
 
   function addHistoryMessage(message: any) {
+    if (message.role !== 'user' && !message.content.trim()) {
+      insertCachedHistory([message]);
+      return;
+    }
     const scene = messageScene(message);
     const rendered = addMessage(
       message.role === "user" ? "user" : "being",
@@ -2930,11 +2972,12 @@ function createStreamRuntime(state: any, options: any): any {
           consumeLocalEcho(role, message.content, messageScene(message), identity))) continue;
       const text = isHistoryMarker(message)
         ? `· ${breathMarkerLabel(message.content)} · ${identity.timestamp} ·`
-        : cleanContent(role === "user" ? stripSceneTransition(stripClientMessageContext(message.content)) : message.content);
-      if (!text) continue;
+        : visibleMessageText(role, message.content);
+      const historyContentError = !isHistoryMarker(message) && role === 'being' && !message.content.trim();
+      if (!text && !historyContentError) continue;
       const item = isHistoryMarker(message)
-        ? { ...identity, kind: "separator", id: `marker-${options.nextId()}`, marker: true, handoffMarker: /^\[breath yielded/i.test(message.content || ''), stopMarker: /^\[breath interrupted/i.test(message.content || ''), text }
-        : { ...identity, kind: "message", id: `message-${options.nextId()}`, role, text,
+        ? { ...identity, kind: "separator", id: `marker-${options.nextId()}`, marker: true, handoffMarker: /^\[breath (?:yielded|superseded)/i.test(message.content || ''), stopMarker: /^\[breath interrupted/i.test(message.content || ''), text }
+        : { ...identity, kind: "message", id: `message-${options.nextId()}`, role, text, historyContentError,
             streaming: false, label: role === "user" ? "you" : beingName, consecutive: false };
       // Insert old records in sequence order without rebuilding live bubbles,
       // moving their tool runs, or changing the current stream's grouping state.
@@ -3003,7 +3046,7 @@ function createStreamRuntime(state: any, options: any): any {
         if (messages.length) return normalizeHistoryRows(messages);
         throw error;
       }
-      const page = normalizeHistoryRows(data.messages);
+      const page = await historyCache.merge(normalizeHistoryRows(data.messages));
       // Keep overlap too: a cursor says where to request next, not which rows
       // the local cache contains (old versions may have left holes).
       messages.push(...page);
@@ -3041,7 +3084,7 @@ function createStreamRuntime(state: any, options: any): any {
           try {
             if (recent?.ok) {
               const data = await recent.json();
-              const older = normalizeHistoryRows(data.messages).filter(m => m.seq <= cached.lastSeq);
+              const older = await historyCache.merge(normalizeHistoryRows(data.messages).filter(m => m.seq <= cached.lastSeq));
               if (older.length) {
                 await historyCache.write(older, cached.lastSeq);
                 if (!disposed) insertCachedHistory(older.sort((a: any, b: any) => a.seq - b.seq));
@@ -3060,7 +3103,10 @@ function createStreamRuntime(state: any, options: any): any {
         delete prefetch.history;
       }
       const msgs = await fetchHistory(incremental, await takePrefetch("history"));
-      if (!msgs) return 0;
+      if (!msgs) {
+        if (!disposed && !state.historyLoadFailed) { state.historyLoadFailed = true; changed(); }
+        return 0;
+      }
       let added = 0;
       let toCache = [];
       if (disposed) return 0;
@@ -3098,9 +3144,11 @@ function createStreamRuntime(state: any, options: any): any {
       }
       if (!incremental) historyCacheSeeded = true;
       cacheHistory(toCache, lastHistorySeq);
+      if (state.historyLoadFailed) { state.historyLoadFailed = false; changed(); }
       return added;
     } catch (e: any) {
       console.warn("reconcileHistory failed:", e);
+      if (!disposed && !state.historyLoadFailed) { state.historyLoadFailed = true; changed(); }
       return 0;
     }
   }
@@ -3231,6 +3279,7 @@ function createStreamRuntime(state: any, options: any): any {
       currentRun.entries = actionLog.map(entry => ({ ...entry }));
       currentRun.end = Date.now();
       currentRun.waitingForReply = false;
+      currentRun.replyConfirmed = !failed;
       currentRun.outcome = failed ? "timeout" : "done";
       currentRun.status = currentRun.outcome;
       currentRun.label = failed ? "等待超时，结果待确认" : "已回复";
@@ -3369,6 +3418,7 @@ function createStreamRuntime(state: any, options: any): any {
     }
 
     isStreaming = true;
+    if (data.stream_id !== lastStreamId) lastServerError = undefined;
     currentStreamId = data.stream_id || null;
     if (currentStreamId) lastStreamId = currentStreamId;
     writerEpoch++; // F2: 接管写权
@@ -3403,6 +3453,8 @@ function createStreamRuntime(state: any, options: any): any {
         index <= (settledThrough.get(eventScenes[index]) ?? -1)));
     } finally { replayingInitialEvents = false; replayRunStartedAt = undefined; }
 
+    if (!isStreaming) return; // An error in the buffered events already ended this replay.
+
     if (data.finished) {
       // 先渲染已累积的文字，再 finalize
       const replayText = cleanContent(streamText);
@@ -3411,7 +3463,7 @@ function createStreamRuntime(state: any, options: any): any {
       return;
     }
 
-    const visibleText = cleanContent(streamText);
+    const visibleText = cleanContent(streamText, true);
     // Replay consumes a whole buffer synchronously. Flush its final text before
     // polling takes a new writer epoch and invalidates the queued render frame.
     // Otherwise only the first token is visible until another network event.
@@ -3599,7 +3651,7 @@ function createStreamRuntime(state: any, options: any): any {
       // segment without stopping the shared reader or the room's pending reply.
       if (autonomousStream && !autonomousHandedOff && PROGRESS_EVENTS.has(eventType) && eventType !== 'message_stop' && eventType !== 'error' &&
           (eventType !== 'content_block_delta' || eventData.delta?.text)) {
-        solidifyReplayBubble();
+        finalizePartialBubble();
         noteStreamEcho();
         streamMessage = null;
         streamText = '';
@@ -3619,6 +3671,7 @@ function createStreamRuntime(state: any, options: any): any {
       }
       return;
     }
+    if (eventType === "error" && repeatedServerError(eventData)) return;
     splitStreamProgress(eventType, eventData);
     if (replayingSettledReply && ['thinking', 'reasoning', 'tool_use', 'tool_result'].includes(eventType)) return;
     if (!replayingSettledReply) markProgress(eventType, eventData);
@@ -3676,7 +3729,7 @@ function createStreamRuntime(state: any, options: any): any {
         isStreaming = false;
         currentStreamId = null;
         removeThinkingIndicator();
-        addMessage("system", "⚠ " + (eventData.message || "unknown error"));
+        addMessageNotice("⚠ " + (eventData.message || "回复失败"), currentReplyBubble());
         setStatus("error");
         tuiClear();
         actionLogClear();
@@ -3694,7 +3747,7 @@ function createStreamRuntime(state: any, options: any): any {
       cancelAnimationFrame(renderTimer);
       renderTimer = null;
     }
-    solidifyReplayBubble();
+    finalizePartialBubble(true);
     if (!replayingSettledReply) settleReplyBoundary();
     if (!pendingReply && !replayingSettledReply) {
       updateRun(true);
@@ -3710,23 +3763,13 @@ function createStreamRuntime(state: any, options: any): any {
     syncHistoryCursor();
   }
 
-  function solidifyReplayBubble() {
-    if (!streamMessage) return;
-    setMessageStreaming(streamMessage, false);
-    const finalText = cleanContent(streamText);
-    if (finalText) updateMessage(streamMessage, finalText);
-    else if (streamMessage.persistedText || streamMessage.historySeq) {
-      if (streamMessage.persistedText) streamMessage.text = streamMessage.persistedText;
-    } else removeMessage(streamMessage);
-  }
-
   function finalizeReplayStream() {
     options.finishRoutes?.();
     if (activeStreamPollTimer) clearTimeout(activeStreamPollTimer);
     activeStreamPollTimer = null;
 
     // 先把 streamText 固化为正式消息（如果还没渲染）
-    solidifyReplayBubble();
+    finalizePartialBubble(true);
     noteStreamEcho();
     settleReplyBoundary();
 
@@ -3829,6 +3872,7 @@ function createStreamRuntime(state: any, options: any): any {
         // this reference, so its answer cannot retroactively finish this run.
         currentRun.end = Date.now();
         currentRun.outcome = currentRun.status = 'done';
+        currentRun.replyConfirmed = true;
         currentRun.label = '已回复';
         currentRun.hint = '';
         logReplyWait('late-reply');
@@ -3860,24 +3904,27 @@ function createStreamRuntime(state: any, options: any): any {
     bindPersisted,
     registerPersistedGroup,
     revealHistory: (rows: any[]) => insertCachedHistory(rows),
-    async loadHistoryTarget(seq: number, sceneId: string) {
-      if (!Number.isSafeInteger(seq) || seq <= 0 || !sceneId || disposed) return false;
+    async loadHistoryTarget(seq: number, sceneId: string, refresh = false) {
+      if (!Number.isSafeInteger(seq) || seq <= 0 || (!sceneId && !refresh) || disposed) return false;
       const found = () => state.items.some((item: any) => item.kind === 'message' && item.historySeq === seq && item.sceneId === sceneId);
-      if (found()) return true;
-      const cached = await historyCache.readAround(seq, sceneId);
-      if (disposed) return false;
-      insertCachedHistory(cached);
-      if (found()) return true;
+      if (!refresh) {
+        if (found()) return true;
+        const cached = await historyCache.readAround(seq, sceneId);
+        if (disposed) return false;
+        insertCachedHistory(cached);
+        if (found()) return true;
+      }
       // A targeted read must not advance the global incremental sync cursor.
       try {
-        const response = await fetch(apiUrl(`/api/history?after=${seq - 1}&limit=21`), { cache: 'no-store', signal: timeoutSignal(8000) });
+        const response = await fetch(apiUrl(`/api/history?after=${seq - 1}&limit=${refresh ? 1 : 21}`), { cache: 'no-store', signal: timeoutSignal(8000) });
         if (!response.ok || disposed) return false;
         const data = await response.json();
-        const rows = normalizeHistoryRows(data.messages).filter(row => messageScene(row).sceneId === sceneId && row.seq >= seq).slice(0, 21);
+        const merged = await historyCache.merge(normalizeHistoryRows(data.messages));
+        const rows = merged.filter(row => refresh ? row.seq === seq : messageScene(row).sceneId === sceneId && row.seq >= seq).slice(0, 21);
         if (disposed) return false;
         insertCachedHistory(rows);
         await historyCache.write(rows, 0);
-        return found();
+        return refresh ? rows.some(row => row.seq === seq && !!row.content.trim()) : found();
       } catch { return false; }
     },
     async loadOlderHistory(before?: number) {
@@ -3896,19 +3943,16 @@ function createStreamRuntime(state: any, options: any): any {
     restoreSceneHistory,
     reconcileHistory,
     syncHistoryCursor,
-    replyCompletedAt: () => currentRun?.label === "已回复" ? currentRun.end || 0 : 0,
+    replyCompletedAt: () => currentRun?.replyConfirmed ? currentRun.end || 0 : 0,
     sceneActivity: () => {
       if (replayTransportOnly && !pendingReply) return null;
-      if (pendingRecovery) return "reconnecting";
-      if (pendingReply && (pendingReply.phase !== "processing" || !isStreaming))
-        return pendingReply.phase === "queued" ? "queued" : "waiting";
-      if (isStreaming && !replyRunSettled)
-        return livePhase === "tool" ? "working" : livePhase === "text" ? "replying" : "thinking";
+      const activity = activeActivity();
+      if (activity) return activity;
       if (currentRun?.end) {
         if (currentRun.outcome === "error" || currentRun.outcome === "timeout") return currentRun.outcome;
         if (currentRun.outcome === "stopped") return "stopped";
         // A bare reasoning/stop boundary does not establish that a reply arrived.
-        return currentRun.label === "已回复" ? "done" : null;
+        return currentRun.replyConfirmed ? "done" : null;
       }
       return null;
     },
@@ -3917,7 +3961,8 @@ function createStreamRuntime(state: any, options: any): any {
     syncConnection: (next: any) => { connState = next; applyDotClass(); },
     acceptReplay: replayStream,
     acceptSceneEvent: (type: any, data: any, settled = false) => {
-      if ((type === "meta" && !data.persisted) || type === "usage") return;
+      if (type === "meta" && !data.persisted) { lastServerError = undefined; return; }
+      if (type === "usage") return;
       // A boundary is not the start of another run. Shared streams may replay
       // stops for idle scenes; opening a run here creates a phantom "已结束 0 秒".
       if (!settled && !isStreaming && PROGRESS_EVENTS.has(type) && type !== "message_stop" && type !== "error") {

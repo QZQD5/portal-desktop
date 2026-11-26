@@ -11,7 +11,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 20px;
+  gap: 16px;
   padding: 32px;
   text-align: center;
   color: var(--secondary);
@@ -24,7 +24,7 @@
 .startup-content p {
   margin: 0;
   font-size: 13px;
-  letter-spacing: 0.02em;
+  line-height: 1.6;
 }
 
 .startup-content button {
@@ -38,15 +38,6 @@
   border-top-color: var(--secondary);
   border-radius: 50%;
   animation: startup-spin 0.9s linear infinite;
-}
-
-.startup-notice {
-  margin: 0;
-  padding: 10px 24px;
-  background: var(--surface);
-  color: var(--secondary);
-  font-size: 12px;
-  border-bottom: 1px solid var(--line);
 }
 
 @keyframes startup-spin {

@@ -102,6 +102,45 @@ body {
   margin: 6px 0;
 }
 
+.message .content {
+  ul:has(> .markdown-task):not(:has(> li:not(.markdown-task))) {
+    padding-inline-start: 0;
+  }
+
+  .markdown-task {
+    display: grid;
+    grid-template-columns: 14px minmax(0, 1fr);
+    align-items: start;
+    gap: 8px;
+    list-style: none;
+  }
+
+  .markdown-task-marker {
+    display: inline-grid;
+    place-items: center;
+    box-sizing: border-box;
+    width: 14px;
+    height: 14px;
+    margin-block-start: calc((1lh - 14px) / 2);
+    border: 1px solid var(--neutral-tertiary, var(--text-muted));
+    border-radius: 3px;
+    color: var(--neutral-main, var(--bg));
+
+    &[data-checked='true'] {
+      border-color: var(--chat-secondary, var(--text-muted));
+      background: var(--chat-secondary, var(--text-muted));
+
+      &::after {
+        content: '';
+        width: 12px;
+        height: 12px;
+        background: currentcolor;
+        mask: var(--chat-task-check) center / contain no-repeat;
+      }
+    }
+  }
+}
+
 .message .content strong {
   font-weight: 600;
 }
@@ -197,10 +236,18 @@ body {
   justify-content: space-between;
   gap: 12px;
   padding: 6px 10px 6px 16px;
+
+  > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 .markdown-code-modes {
   display: flex;
+  flex: none;
   gap: 2px;
   padding: 2px;
   border-radius: 7px;
@@ -234,16 +281,23 @@ body {
   outline-offset: 2px;
 }
 
-.message .content .rich-code-block pre {
+.message .content pre[tabindex] {
   white-space: pre;
   overflow-x: auto;
+  overscroll-behavior-inline: contain;
   overflow-wrap: normal;
   max-width: 100%;
   margin: 0;
+
+  &:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+  }
 }
 
-.message .content .rich-code-block pre code {
-  white-space: inherit;
+.message .content pre[tabindex] code {
+  white-space: pre;
+  overflow: visible;
   word-break: normal;
   overflow-wrap: normal;
 }
@@ -417,14 +471,6 @@ body {
 #activity-log {
   border-color: var(--border);
   background: var(--bg-soft);
-}
-
-#reconnect-banner {
-  width: calc(100% - 64px);
-  max-width: 760px;
-  margin: 0 auto 10px;
-  border-radius: 6px;
-  font-size: 11px;
 }
 
 .pending-file {

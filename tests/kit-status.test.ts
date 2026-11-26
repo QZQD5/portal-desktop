@@ -6,7 +6,7 @@ import type { DesktopAPI, KitInstallPlan, KitLibrary, LocalKit, TownResult } fro
 
 const kit = (name: string, version = "1.0"): LocalKit => ({ name, version, directory: "/kits/" + name, description: "Kit", command: ["node", "server.mjs"], tools: [], compatible: true, eager: false });
 const library = (...kits: LocalKit[]): KitLibrary => ({ directory: "/kits", enabled: true, kits });
-const plan: KitInstallPlan = { ...kit("alpha"), ticket: "ticket", tools: 0, environment: [], dependency: "none", sha256: "fixture", notes: "" };
+const plan: KitInstallPlan & { sourceId: string } = { ...kit("alpha"), sourceId: "alpha-id", ticket: "ticket", tools: 0, environment: [], dependency: "none", sha256: "fixture", notes: "" };
 function fixture(overrides: Partial<DesktopAPI> = {}) {
   const api = {
     localKits: vi.fn(async () => library()),
@@ -21,6 +21,93 @@ function fixture(overrides: Partial<DesktopAPI> = {}) {
 }
 
 describe("Kit installation status", () => {
+  it('reports history only after a successful install, not when reading lists or retrying a failure', async () => {
+    const reportLocalKitHistory = vi.fn().mockRejectedValue(new Error('接口未上线'));
+    const installKit = vi.fn().mockRejectedValueOnce(new Error('安装失败')).mockResolvedValue({ name: 'alpha', message: '已安装', tools: 0 });
+    const { model } = fixture({
+      prepareKit: vi.fn().mockResolvedValue(plan), installKit,
+      home: { connectors: { reportLocalKitHistory } } as unknown as DesktopAPI['home'],
+    });
+    await model.load();
+    await model.refreshInstalledKits();
+    await model.prepareKit('town-source-id');
+    expect(reportLocalKitHistory).not.toHaveBeenCalled();
+    await model.install();
+    expect(reportLocalKitHistory).not.toHaveBeenCalled();
+    await model.install();
+    expect(reportLocalKitHistory).toHaveBeenCalledExactlyOnceWith({ source_id: 'town-source-id', version: plan.version });
+    expect(model.installError).toBe('');
+    expect(model.plan).toBeUndefined();
+    await model.load();
+    await model.refreshInstalledKits();
+    expect(reportLocalKitHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens local Kit mode without loading the remote Grove catalog', async () => {
+    const local = kit('alpha');
+    const town = vi.fn(async () => ({ ok: true as const, data: { kits: [] }, fetchedAt: '' }));
+    const localKits = vi.fn(async () => library(local));
+    const { model, api } = fixture({ town, localKits });
+    model.localOnly = true;
+    model.show('kits');
+    await vi.waitFor(() => expect(model.loading).toBe(false));
+    expect(model.tab).toBe('local');
+    expect(town).not.toHaveBeenCalled();
+    await model.showInstalledKit('alpha');
+    expect(model.localKit?.name).toBe('alpha');
+    expect(api.localKits).toHaveBeenCalled();
+  });
+
+  it('restores the Grove catalog when leaving local-only Kit mode', async () => {
+    const { model, api } = fixture();
+    model.selectTab('local');
+    await vi.waitFor(() => expect(model.loading).toBe(false));
+    expect(model.tab).toBe('local');
+    expect(api.town).not.toHaveBeenCalled();
+    model.setLocalOnly(false);
+    await vi.waitFor(() => expect(model.loading).toBe(false));
+    expect(model.tab).toBe('grove');
+    expect(model.localOnly).toBe(false);
+    expect(api.town).toHaveBeenCalledWith(expect.objectContaining({ kind: 'grove' }));
+  });
+
+  it.each(['', 'app', 'plugin'] as const)('preserves the %s filter when toggling local-only tools', async groveKind => {
+    const { model, api } = fixture();
+    model.groveKind = groveKind;
+    model.setLocalOnly(true);
+    await vi.waitFor(() => expect(model.loading).toBe(false));
+    expect(model.tab).toBe('local');
+    expect(model.groveKind).toBe(groveKind);
+    expect(api.town).not.toHaveBeenCalled();
+    model.setLocalOnly(false);
+    await vi.waitFor(() => expect(model.loading).toBe(false));
+    expect(model.tab).toBe('grove');
+    expect(model.groveKind).toBe(groveKind);
+    expect(api.town).toHaveBeenCalledWith(expect.objectContaining({ kind: 'grove' }));
+    model.setLocalOnly(true);
+    await vi.waitFor(() => expect(model.loading).toBe(false));
+    expect(model.tab).toBe('local');
+    expect(model.groveKind).toBe(groveKind);
+    expect(api.town).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes local Kit state after deletion without reloading Grove', async () => {
+    const local = kit('alpha');
+    let installed = true;
+    const town = vi.fn(async () => ({ ok: true as const, data: { kits: [] }, fetchedAt: '' }));
+    const { model } = fixture({
+      town,
+      localKits: vi.fn(async () => installed ? library(local) : library()),
+      deleteKit: vi.fn(async () => { installed = false; return { deleted: true, name: 'alpha' }; }),
+    });
+    model.localOnly = false;
+    model.tab = 'grove';
+    model.pendingDeleteKit = local;
+    await model.confirmDeleteKit();
+    expect(town).not.toHaveBeenCalled();
+    expect(model.installedLibrary?.kits).toHaveLength(0);
+  });
+
   it('commits remote selection with its detail request and rejects an older response', async () => {
     const pending = new Map<string, (value: any) => void>();
     const { model } = fixture({ town: vi.fn(query => new Promise<TownResult>(resolve => pending.set(query.id!, resolve))) });
@@ -119,7 +206,7 @@ describe("Kit installation status", () => {
     expect(model.search).toBe("alpha");
     expect(model.plan).toBeUndefined();
     await model.showInstalledKit("alpha");
-    expect(model.tab).toBe("grove");
+    expect(model.tab).toBe("local");
     expect(model.localOnly).toBe(true);
     expect(model.groveKind).toBe('kit');
     expect(model.localKit?.name).toBe("alpha");

@@ -1,5 +1,48 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { DesktopAPI, PortalState, TownLiveState } from '../shared/types';
+import { HOME_ORIGIN, CONNECTOR_NETWORK_METHODS, connectorNetworkPath, homeKitBundlePath } from '../shared/home';
+
+async function connectorRequest(operation: keyof typeof CONNECTOR_NETWORK_METHODS, ...args: unknown[]): Promise<any> {
+  const key = await ipcRenderer.invoke('beings:home-connector-network-key');
+  const method = CONNECTOR_NETWORK_METHODS[operation];
+  const requestArgs = [...args];
+  while (requestArgs.length && requestArgs.at(-1) === undefined) requestArgs.pop();
+  const url = new URL(`beings://desktop${connectorNetworkPath(operation, requestArgs)}`);
+  if (method === 'GET' && requestArgs.length) url.searchParams.set('args', JSON.stringify(requestArgs));
+  const response = await fetch(url.href, {
+    method, credentials: 'omit', cache: 'no-store',
+    headers: { 'Content-Type': 'application/json', 'X-Connector-Access': key },
+    ...(method === 'GET' ? {} : { body: JSON.stringify(operation === 'report-local-kit-history' ? requestArgs[0] : requestArgs) }),
+  });
+  if (response.status === 204) return;
+  if (operation === 'local-kit-bundle' && response.ok) return new Uint8Array(await response.arrayBuffer());
+  const body = await response.text();
+  if (operation === 'catalog' && [404, 405].includes(response.status)) return connectorRequest('legacy-catalog', ...args);
+  if (!response.ok && response.headers.has('X-Connector-Error')) throw new Error(decodeURIComponent(response.headers.get('X-Connector-Error')!));
+  if (!body.trim()) throw new Error(response.ok ? 'Connector 返回空响应。' : `Connector 请求失败（HTTP ${response.status}）。`);
+  let value: { error?: unknown; accepted?: boolean };
+  try { value = JSON.parse(body) as { error?: unknown; accepted?: boolean }; }
+  catch { throw new Error('Connector 返回无效响应。'); }
+  if (!response.ok && !(operation === 'lifecycle' && response.status === 409 && value?.accepted === false)) {
+    throw new Error(typeof value?.error === 'string' ? value.error : `Connector 请求失败（HTTP ${response.status}）。`);
+  }
+  if (operation === 'catalog' || operation === 'legacy-catalog') {
+    const page = value as import('../shared/home').HomeConnectorCatalogPage;
+    if (!page || !Array.isArray(page.items)) throw new Error('统一应用目录响应无效。');
+    return { ...page, items: page.items.map(item => ({ ...item, icon_url: item.icon_url ? URL.parse(item.icon_url, HOME_ORIGIN)?.href ?? null : item.icon_url ?? null })) };
+  }
+  if (operation === 'app-detail') {
+    const detail = value as import('../shared/home').HomeAppDetail;
+    if (!detail?.app || !['cloud_connector', 'local_kit'].includes(detail.kind) ||
+        (detail.kind === 'local_kit' ? !detail.local_kit || !Array.isArray(detail.local_kit.tools) : !detail.connector || !Array.isArray(detail.connector.accounts) || !Array.isArray(detail.connector.methods))) throw new Error('统一应用详情响应无效。');
+    const icon = (url: string | null | undefined) => url ? URL.parse(url, HOME_ORIGIN + '/')?.href ?? null : null;
+    detail.app.icon_url = icon(detail.app.icon_url);
+    if (detail.kind === 'cloud_connector') detail.connector.icon_url = icon(detail.connector.icon_url);
+    return detail;
+  }
+  return value;
+}
+
 const api: DesktopAPI = {
   voice: {
     start: () => ipcRenderer.invoke('beings:voice-start'),
@@ -13,22 +56,29 @@ const api: DesktopAPI = {
   },
   home: {
     connectors: {
-      catalog: query => ipcRenderer.invoke('beings:home-connector-catalog', query),
-      installations: after => ipcRenderer.invoke('beings:home-connector-installations', after),
-      detail: releaseId => ipcRenderer.invoke('beings:home-connector-detail', releaseId),
-      startOAuth: (releaseId, installationId) => ipcRenderer.invoke('beings:home-connector-start-oauth', releaseId, installationId),
-      syncOAuth: (flowId, expectedRevision) => ipcRenderer.invoke('beings:home-connector-sync-oauth', flowId, expectedRevision),
-      oauthState: flowId => ipcRenderer.invoke('beings:home-connector-oauth-state', flowId),
-      preview: (releaseId, input) => ipcRenderer.invoke('beings:home-connector-preview', releaseId, input),
-      confirm: (intentId, input) => ipcRenderer.invoke('beings:home-connector-confirm', intentId, input),
-      state: intentId => ipcRenderer.invoke('beings:home-connector-state', intentId),
-      advance: intentId => ipcRenderer.invoke('beings:home-connector-advance', intentId),
-      cancel: intentId => ipcRenderer.invoke('beings:home-connector-cancel', intentId),
+      catalog: query => connectorRequest('catalog', query),
+      localKitHistory: after => connectorRequest('local-kit-history', after),
+      reportLocalKitHistory: input => connectorRequest('report-local-kit-history', input),
+      installations: after => connectorRequest('installations', after),
+      installation: installationId => connectorRequest('installation', installationId),
+      removeAccount: (releaseId, connectionId) => connectorRequest('remove-account', releaseId, connectionId),
+      appDetail: releaseId => connectorRequest('app-detail', releaseId),
+      detail: async releaseId => {
+        const detail = await connectorRequest('app-detail', releaseId) as import('../shared/home').HomeAppDetail;
+        if (detail.kind !== 'cloud_connector') throw new Error('本地 Kit 不支持云端连接操作。');
+        return detail.connector;
+      },
+      preview: (releaseId, input) => connectorRequest('preview', releaseId, input),
+      confirm: (intentId, input) => connectorRequest('confirm', intentId, input),
+      state: intentId => connectorRequest('state', intentId),
+      advance: intentId => connectorRequest('advance', intentId),
+      cancel: intentId => connectorRequest('cancel', intentId),
       openAuthorization: url => ipcRenderer.invoke('beings:home-connector-open', url),
-      tools: installationId => ipcRenderer.invoke('beings:home-connector-tools', installationId),
-      setTool: (installationId, input) => ipcRenderer.invoke('beings:home-connector-set-tool', installationId, input),
-      setBeingAccess: (installationId, enabled, expectedRevision) => ipcRenderer.invoke('beings:home-connector-being-access', installationId, enabled, expectedRevision),
-      lifecycle: (installationId, action, expectedRevision) => ipcRenderer.invoke('beings:home-connector-lifecycle', installationId, action, expectedRevision),
+      tools: installationId => connectorRequest('tools', installationId),
+      setTool: (installationId, input) => connectorRequest('set-tool', installationId, input),
+      setBeingAccess: (installationId, enabled, expectedRevision) => connectorRequest('being-access', installationId, enabled, expectedRevision),
+      beingAccess: installationId => connectorRequest('get-being-access', installationId),
+      lifecycle: (installationId, action, expectedRevision, requestId) => connectorRequest('lifecycle', installationId, action, expectedRevision, requestId),
     },
     files: {
       list: path => ipcRenderer.invoke('beings:home-files-list', path),
@@ -115,6 +165,7 @@ const api: DesktopAPI = {
   browserState: () => ipcRenderer.invoke('beings:browser-state'),
   openBrowser: url => ipcRenderer.invoke('beings:browser-open', url),
   copyText: text => ipcRenderer.invoke('beings:clipboard-copy', text),
+  copyImage: (data, mime) => ipcRenderer.invoke('beings:clipboard-image', data, mime),
   editChat: command => ipcRenderer.invoke('beings:chat-edit', command),
   editSelection: command => ipcRenderer.invoke('beings:selection-edit', command),
   browserAction: action => ipcRenderer.invoke('beings:browser-action', action),
@@ -152,13 +203,40 @@ const api: DesktopAPI = {
   localKits: () => ipcRenderer.invoke('beings:kits'),
   deleteKit: name => ipcRenderer.invoke('beings:kit-delete', name),
   importKit: () => ipcRenderer.invoke('beings:kit-import'),
-  prepareKit: id => ipcRenderer.invoke('beings:kit-prepare', id),
+  prepareKit: async (id, releaseId) => {
+    if (!releaseId) return ipcRenderer.invoke('beings:kit-prepare', id);
+    const detail = await connectorRequest('app-detail', releaseId) as import('../shared/home').HomeAppDetail;
+    if (detail.kind !== 'local_kit' || detail.app.release_id !== releaseId || detail.local_kit.source_id !== id || detail.local_kit.installer !== 'desktop_legacy') throw new Error('本地 Kit 来源与目录不一致，请刷新后重试。');
+    if (detail.app.availability !== 'listed' || !detail.local_kit.bundle) throw new Error(detail.app.unavailable_reason || '此 Kit 暂无可用的安装包。');
+    homeKitBundlePath(releaseId, detail.local_kit.bundle);
+    const archive = await connectorRequest('local-kit-bundle', releaseId, detail.local_kit.bundle.sha256);
+    return ipcRenderer.invoke('beings:kit-prepare-home', { sourceId: id, releaseId, archive });
+  },
   installKit: input => ipcRenderer.invoke('beings:kit-install', input),
   discardKit: ticket => ipcRenderer.invoke('beings:kit-discard', ticket),
   openKits: () => ipcRenderer.invoke('beings:kits-open'),
   openTownLink: route => ipcRenderer.invoke('beings:town-open', route),
   snapshot: () => ipcRenderer.invoke('beings:snapshot'),
-  save: input => ipcRenderer.invoke('beings:save', input),
+  save: async input => {
+    if (input.subagentInherit === undefined && !input.subagentSetup) return ipcRenderer.invoke('beings:save', input);
+    const { key, url, body } = await ipcRenderer.invoke('beings:subagent-network-prepare', input);
+    const response = await fetch(url, {
+      method: 'POST', credentials: 'omit', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Subagent-Access': key },
+      body,
+    });
+    // DevTools retains the original response; the form displays the safe summary.
+    if (!response.ok && response.headers.has('X-Subagent-Error')) {
+      await response.arrayBuffer();
+      throw new Error(decodeURIComponent(response.headers.get('X-Subagent-Error')!));
+    }
+    if (!response.ok) {
+      const value = await response.json();
+      throw new Error(value.error || `subagent 配置失败（HTTP ${response.status}）。`);
+    }
+    await response.arrayBuffer();
+    return ipcRenderer.invoke('beings:subagent-network-result', key);
+  },
   toolApprovalPending: () => ipcRenderer.invoke('beings:tool-approval-pending'),
   answerToolApproval: (id, allowed) => ipcRenderer.invoke('beings:tool-approval-answer', id, allowed),
   onToolApproval: callback => {
@@ -166,9 +244,8 @@ const api: DesktopAPI = {
     ipcRenderer.on('beings:tool-approval', listener);
     return () => ipcRenderer.removeListener('beings:tool-approval', listener);
   },
-  beingModelCatalog: input => ipcRenderer.invoke('beings:model-catalog', input),
-  beingModelConfig: patch => ipcRenderer.invoke("beings:model-config", patch),
   sceneTasks: () => ipcRenderer.invoke('beings:scene-tasks'),
+  subagentTaskDetails: (endpoint, taskIds) => ipcRenderer.invoke('beings:subagent-task-details', endpoint, taskIds),
   recentChatHistory: endpoint => ipcRenderer.invoke('beings:recent-chat-history', endpoint),
   onSceneTasks: callback => {
     const listener = (_event: unknown, snapshot: import('../shared/types').SceneTaskSnapshot) => callback(snapshot);
@@ -176,6 +253,7 @@ const api: DesktopAPI = {
     return () => ipcRenderer.removeListener('beings:scene-tasks', listener);
   },
   subagentConfig: () => ipcRenderer.invoke('beings:subagent-config'),
+  subagentStatus: () => ipcRenderer.invoke('beings:subagent-status'),
   choose: kind => ipcRenderer.invoke('beings:choose', kind),
   startPortal: () => ipcRenderer.invoke('beings:portal-start'),
   restartPortal: () => ipcRenderer.invoke('beings:portal-restart'),

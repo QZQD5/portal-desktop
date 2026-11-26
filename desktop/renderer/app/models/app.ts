@@ -79,8 +79,13 @@ export class AppModel extends Store {
   sbsEnabled = true;
   sbsKnown = false;
   toastMessage = "";
+  toastCopied = false;
   settingsOpen = false;
   subagentSettingsOpen = false;
+  subagentTaskIds: string[] = [];
+  subagentSelectedTaskId?: string;
+  openSubagentTasks(taskIds: string[], selectedId?: string) { this.subagentTaskIds = taskIds; this.subagentSelectedTaskId = selectedId; this.changed(); }
+  closeSubagentTasks = () => { this.subagentTaskIds = []; this.changed(); };
   subagentFromConnection = false;
   modelSettingsTarget: "Heart" | "subagent" = "Heart";
   openSubagentSettings(fromConnection = false) {
@@ -331,10 +336,12 @@ export class AppModel extends Store {
     }
     this.changed();
   }
-  toast = (error: unknown) => {
-    this.toastMessage = errorText(error);
+  toast = (error: unknown, copied = false) => {
+    this.toastCopied = copied;
+    this.toastMessage = error === '' ? '' : errorText(error);
     this.changed();
     clearTimeout(this.toastTimer);
+    if (!this.toastMessage) return;
     this.toastTimer = setTimeout(() => {
       this.toastMessage = "";
       this.changed();
@@ -368,6 +375,7 @@ export class AppModel extends Store {
       this.snapshot?.settings.endpoint === next.settings.endpoint &&
       this.snapshot?.settings.being === next.settings.being);
     const sameChat = sameBeing && this.snapshot?.chatScene?.scene_id === next.chatScene?.scene_id;
+    if (!sameChat || reload) this.subagentTaskIds = [];
     if (reload || !next.settings.hasToken || (this.snapshot && next.settings.endpoint !== this.snapshot.settings.endpoint)) {
       this.logsRequest = "";
       this.logsLoading = false;
@@ -438,7 +446,6 @@ export class AppModel extends Store {
   async changeChatSession(operation: "create" | "bind" | "select" | "rename" | "delete", value: string, sceneId?: string, historySeq?: number) {
     const endpoint = this.snapshot?.settings.endpoint;
     if (!endpoint) throw new Error("请先连接 Being。");
-    const previousSceneId = this.snapshot?.chatScene?.scene_id;
     const request = ++this.sessionChange;
     const next = await this.api.changeChatSession(operation, value, endpoint, sceneId);
     if (this.snapshot?.settings.endpoint !== endpoint || request !== this.sessionChange) return;
@@ -448,8 +455,6 @@ export class AppModel extends Store {
     this.chatHistoryScope = this.historyTarget ? "current" : this.savedChatHistoryScope();
     this.navigate("chat");
     this.postCurrentSession();
-    if (next.chatScene && next.chatScene.scene_id !== previousSceneId)
-      this.toast(`已切到「${next.chatScene.scene_meta.scene_label}」场景`);
   }
   private postCurrentSession() {
     if (this.chatSource && this.snapshot?.chatScene) this.post({
@@ -497,7 +502,7 @@ export class AppModel extends Store {
   get colorScheme() { return renderedColorScheme(this.theme); }
   postAppearance() {
     this.post({ type: 'beings:chat-top-inset', value: this.chatTopInset });
-    this.post({ type: "beings:appearance", theme: this.colorScheme });
+    this.post({ type: "beings:appearance", theme: this.colorScheme, toastHost: true });
     this.post({ type: "beings:reading", size: this.readingSize });
     this.post({ type: "beings:reasoning-display", show: this.showReasoning });
     if (this.chatSource) this.post({ type: 'beings:history-limit', limit: this.chatHistoryLimit, revision: new URL(this.chatSource).searchParams.get('revision') });
@@ -811,7 +816,7 @@ export class AppModel extends Store {
       autoStart: s.autoStart,
       backgroundEnabled: Boolean(s.backgroundEnabled),
       allowExec: s.allowExec,
-      permissionMode: s.permissionMode ?? 'auto-review',
+      permissionMode: s.permissionMode ?? 'supervised',
       kitsEnabled: s.kitsEnabled,
       portalConfigPath: s.portalConfigPath,
       portalEnvironmentPath: s.portalEnvironmentPath,

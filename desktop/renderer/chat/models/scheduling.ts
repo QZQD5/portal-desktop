@@ -1,5 +1,6 @@
 import type { ChatItem, Message, Run } from './chat';
 import type { SceneTask } from '../../../shared/types';
+import type { MessageScene } from './scenes';
 
 /** Keep the wire text intact for history matching; separate Desktop metadata only for presentation. */
 export function splitSchedulingHint(text: string) {
@@ -11,17 +12,17 @@ export function splitSchedulingHint(text: string) {
   return { text: text.slice(0, start), hint };
 }
 
-/** Attach process metadata to its originating scene/turn, never the selected scene.
- * History may not contain transient reasoning runs; in that case create one
- * presentation-only process row. Do not change wire messages or runtime state.
+/** Attach process metadata only to an existing run in its originating scene/turn.
+ * Reloaded history without transient reasoning stays free of process rows.
+ * Do not change wire messages or runtime state.
  */
-export function withScheduling(items: ChatItem[], tasks: SceneTask[]): ChatItem[] {
+export function withScheduling(items: ChatItem[], tasks: SceneTask[], currentScene?: MessageScene): ChatItem[] {
   const users = items.filter((item): item is Message => item.kind === 'message' && item.role === 'user');
   // Most turns have no scheduling metadata. Avoid matching every historical
   // run to a user (and allocating another timeline) on each streamed frame.
   if (!tasks.length && !users.some(user => splitSchedulingHint(user.text).hint)) return items;
   const owner = (sceneId: string | undefined, at: number) => users
-    .filter(user => user.sceneId === sceneId && user.createdAt != null && user.createdAt <= at)
+    .filter(user => (sceneId ? user.sceneId === sceneId : currentScene?.sceneId ? user.sceneId === currentScene.sceneId : true) && user.createdAt != null && user.createdAt <= at)
     .sort((a, b) => b.createdAt! - a.createdAt!)[0];
   const groups = new Map<string, { user: Message; hint: string; tasks: SceneTask[]; run?: Run }>();
   for (const user of users) groups.set(user.id, { user, hint: splitSchedulingHint(user.text).hint, tasks: [] });
@@ -29,52 +30,25 @@ export function withScheduling(items: ChatItem[], tasks: SceneTask[]): ChatItem[
     const user = owner(task.sceneId, task.createdAt);
     if (user) groups.get(user.id)!.tasks.push(task);
   }
+  const precedingUsers = new Map<string | undefined, Message>();
   for (const item of items) {
+    if (item.kind === 'message' && item.role === 'user') precedingUsers.set(item.sceneId, item);
     if (item.kind !== 'run') continue;
-    const user = owner(item.sceneId, item.start);
+    // Run timers can start before the server timestamps the user message.
+    // The transcript's scene/turn order keeps that run with its actual bubble.
+    const user = precedingUsers.get(item.sceneId);
     const group = user && groups.get(user.id);
     if (group && !group.run) group.run = item;
   }
   const replacements = new Map<string, Run>();
-  const insertions = new Map<string, Run>();
   for (const group of groups.values()) {
-    if (!group.hint && !group.tasks.length) continue;
-    const { user, tasks: assigned } = group;
-    const lastEnd = Math.max(0, ...assigned.map(task => task.endedAt || 0));
-    const replied = lastEnd > 0 && items.some(item => item.kind === 'message' && item.role === 'being'
-      && !item.streaming && !item.interim
-      && item.sceneId === user.sceneId && (item.createdAt || 0) >= lastEnd
-      && owner(item.sceneId, item.createdAt || 0)?.id === user.id);
-    const active = assigned.some(task => task.status === 'running' || task.status === 'queued');
-    const failed = !active && !replied && assigned.some(task => ['failed', 'interrupted', 'budget_exhausted', 'timeout'].includes(task.status));
-    const waiting = !active && !failed && !replied && assigned.some(task => task.status === 'done');
-    const run: Run = group.run ? { ...group.run } : {
-      kind: 'run', id: `scheduling-${user.id}`, sceneId: user.sceneId, sceneLabel: user.sceneLabel,
-      entries: [], start: user.createdAt || 0, end: lastEnd || user.createdAt || 1,
-      label: '思考过程', hint: '', arg: '', synthetic: true,
-    };
-    run.scheduling = { hint: group.hint, tasks: assigned };
-    // A stage reply ends a breath, but does not finish its delegated work.
-    if (active) {
-      run.end = undefined;
-      run.label = '后台执行中';
-      run.waitingForReply = true;
-      run.outcome = undefined;
-      run.status = 'working';
-    } else if (waiting && run.outcome !== 'error' && run.outcome !== 'timeout' && run.outcome !== 'stopped') {
-      run.end = undefined;
-      run.label = '后台已完成，尚未收到回复';
-      run.waitingForReply = true;
-      run.outcome = undefined;
-      run.status = 'waiting';
-    } else if (failed && (run.end || run.synthetic)) {
-      run.label = '后台任务异常'; run.outcome = 'error'; run.status = 'error';
-    }
-    if (group.run) replacements.set(group.run.id, run);
-    else insertions.set(user.id, run);
+    if (!group.run || (!group.hint && !group.tasks.length)) continue;
+    // The task ledger describes child work, not the parent stream lifecycle.
+    // Keep completion, waiting and timing owned by the chat runtime.
+    replacements.set(group.run.id, {
+      ...group.run,
+      scheduling: { hint: group.hint, tasks: group.tasks },
+    });
   }
-  return items.flatMap(item => {
-    const inserted = insertions.get(item.id);
-    return inserted ? [item, inserted] : [replacements.get(item.id) || item];
-  });
+  return items.map(item => replacements.get(item.id) || item);
 }

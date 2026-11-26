@@ -47,7 +47,7 @@ assert.notEqual(previousVersion, pkg.version);
 const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "portal-upgrade 中文 ' ")));
 const profile = path.join(root, 'profile'), workspace = path.join(root, 'workspace'), kits = path.join(root, 'kits');
 const current = path.join(root, 'Applications/Portal Desktop.app'), executable = path.join(current, 'Contents/MacOS/Portal Desktop');
-let app, upgradedPid, relay, nextId = 0, passed = false, mounted = false;
+let app, upgradedPid, relay, nextId = 0, passed = false, mountedDevice;
 const mount = path.join(root, 'mounted');
 const ownedPortalPids = new Set(), pending = new Map();
 const token = 'local-upgrade-fixture';
@@ -87,10 +87,14 @@ const readJSON = async file => JSON.parse(await readFile(file, 'utf8'));
 try {
   await Promise.all([mkdir(workspace), mkdir(kits), mkdir(path.dirname(current))]);
   await mkdir(mount);
-  await execute('/usr/bin/hdiutil', ['attach', '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', mount, dmg]);
-  mounted = true;
-  await execute('/usr/bin/ditto', [path.join(mount, `${pkg.productName}.app`), current]);
-  await execute('/usr/bin/hdiutil', ['detach', mount]); mounted = false;
+  const attachment = path.join(root, 'mount.plist');
+  await writeFile(attachment, (await execute('/usr/bin/hdiutil', ['attach', '-plist', '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', mount, dmg])).stdout);
+  const entities = JSON.parse((await execute('/usr/bin/plutil', ['-convert', 'json', '-o', '-', attachment])).stdout)['system-entities'];
+  mountedDevice = entities.find(entry => entry['dev-entry'])?.['dev-entry'];
+  const mountedPath = entities.find(entry => entry['mount-point'])?.['mount-point'];
+  assert(mountedDevice && mountedPath, 'hdiutil must report the attached device and volume');
+  await execute('/usr/bin/ditto', [path.join(mountedPath, `${pkg.productName}.app`), current]);
+  await execute('/usr/bin/hdiutil', ['detach', mountedDevice]); mountedDevice = undefined;
   await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', current]);
   assert.equal(sha(await readFile(path.join(current, 'Contents/Resources/app.asar'))), sha(await readFile(path.join(candidate, 'Contents/Resources/app.asar'))));
   const unpacked = path.join(root, 'asar');
@@ -109,7 +113,16 @@ try {
   await writeFile(path.join(current, 'Contents/Resources/runtime-bundle.json'), JSON.stringify({ ...expectedBundle, clientVersion: previousVersion, id: sha('previous-fixture:' + expectedBundle.id) }));
   const entitlement = path.join(root, 'entitlements.plist');
   await writeFile(entitlement, (await execute('/usr/bin/codesign', ['--display', '--entitlements', ':-', candidate])).stdout);
-  await execute('/usr/bin/codesign', ['--force', '--sign', signing.identity, '--timestamp', '--options', 'runtime', '--entitlements', entitlement, current]);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await execute('/usr/bin/codesign', ['--force', '--sign', signing.identity, '--timestamp', '--options', 'runtime', '--entitlements', entitlement, current]);
+      break;
+    } catch (error) {
+      if (attempt >= 2 || !error.stderr?.includes('A timestamp was expected but was not found.')) throw error;
+      console.log('Apple timestamp missing while signing the upgrade fixture; retrying.');
+      await pause(2000);
+    }
+  }
   await execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', current]);
   const configPath = path.join(root, 'custom portal.toml');
   const config = `# Existing user configuration must remain byte-for-byte intact.\nname = "upgrade-fixture"\nworkspace = ${JSON.stringify(workspace)}\nkits_dir = ${JSON.stringify(kits)}\nkits_enabled = true\nbind = "127.0.0.1:0"\n[tools]\nexec = true\nfile = true\nsearch = true\nweb_fetch = true\ncustom_tools_enabled = true\nscreenshot = false\n[security]\nexec_allowlist = []\nmax_file_size = 4321000\n`;
@@ -126,7 +139,7 @@ try {
   const connectionLink = `http://127.0.0.1:${server.address().port}/upgrade-fixture/?token=${token}`;
   await page.evaluate(async input => {
     const { settings } = await window.beings.snapshot();
-    await window.beings.save({ ...settings, ...input, backgroundEnabled: true, autoStart: false, allowExec: true, kitsEnabled: true });
+    await window.beings.save({ ...settings, ...input, backgroundEnabled: true, autoStart: false, allowExec: true, kitsEnabled: true, permissionMode: 'full-access' });
     await window.beings.stopPortal();
     await window.beings.save({ ...(await window.beings.snapshot()).settings, backgroundEnabled: false });
   }, { connectionLink, portalName: 'upgrade-fixture', workspace, portalConfigPath: configPath, portalEnvironmentPath: `${path.join(root, 'custom bin')}:${process.env.PATH}` });
@@ -170,7 +183,7 @@ try {
   });
   await until('installation commits', async () => !(await readdir(profile)).includes('client-install.json'));
   const after = await readJSON(path.join(profile, 'connection.json'));
-  for (const key of ['endpoint', 'being', 'workspace', 'portalName', 'portalConfigPath', 'portalEnvironmentPath', 'backgroundEnabled', 'autoStart', 'allowExec', 'kitsEnabled']) assert.deepEqual(after.settings[key], before.settings[key], key);
+  for (const key of ['endpoint', 'being', 'workspace', 'portalName', 'portalConfigPath', 'portalEnvironmentPath', 'backgroundEnabled', 'autoStart', 'allowExec', 'kitsEnabled', 'permissionMode']) assert.deepEqual(after.settings[key], before.settings[key], key);
   assert.equal(sha(await readFile(after.settings.portalBinary)), expectedBundle.sha256);
   assert.equal((await readJSON(path.join(profile, 'portal-service.json'))).bundleId, expectedBundle.id);
   assert.equal(await readFile(configPath, 'utf8'), config);
@@ -198,10 +211,10 @@ try {
   console.log(`PASS: DMG installation → ${previousVersion} → ${pkg.version}; GitHub Release check/ZIP download/check/replace/relaunch; original config and files retained; exact bundled Portal ${status.pid} belongs to new client ${upgradedPid}; old guardian disabled; file/exec/tool list verified; no duplicate or restart loop.`);
   passed = true;
 } catch (error) {
-  console.error('Native upgrade failed. Isolated artifacts:', root);
+  console.error('Native upgrade failed. Isolated artifacts:', root, error);
   throw error;
 } finally {
-  if (mounted) await execute('/usr/bin/hdiutil', ['detach', mount]);
+  if (mountedDevice) await execute('/usr/bin/hdiutil', ['detach', mountedDevice]);
   if (app) await app.close().catch(() => {});
   upgradedPid ??= (await clients()).find(p => p.executable === executable)?.pid;
   if (upgradedPid) { try { process.kill(upgradedPid, 'SIGTERM'); } catch { /* Already exited. */ } }

@@ -152,7 +152,7 @@ try {
   assert.equal(await app.evaluate(({ app }) => app.getVersion()), previous);
   await page.evaluate(async input => {
     const { settings } = await window.beings.snapshot();
-    await window.beings.save({ ...settings, ...input, backgroundEnabled: true, autoStart: false, allowExec: true, kitsEnabled: true });
+    await window.beings.save({ ...settings, ...input, backgroundEnabled: true, autoStart: false, allowExec: true, kitsEnabled: true, permissionMode: 'full-access' });
   }, { connectionLink: `http://127.0.0.1:${server.address().port}/upgrade-fixture/?token=${token}`, portalName: 'upgrade-fixture', workspace, portalConfigPath: configPath });
   await until('old client Portal connects', async () => (await page.evaluate(() => window.beings.snapshot())).portal.phase === 'connected');
   const before = await page.evaluate(() => window.beings.snapshot());
@@ -188,7 +188,8 @@ try {
   finally { clearTimeout(timer); }
   app = undefined;
   console.log('Old client exited; waiting for the independent installer and new client.');
-  upgradedPid = await until('NSIS launches new client', async () => (await clients()).find(p => p.ExecutablePath === installed(pkg.version) && p.ProcessId !== oldClientPid)?.ProcessId);
+  // Give the independent installer the same budget as a direct Setup invocation.
+  upgradedPid = await until('NSIS launches new client', async () => (await clients()).find(p => p.ExecutablePath === installed(pkg.version) && p.ProcessId !== oldClientPid)?.ProcessId, 150_000);
   const state = await until('new bundled Portal connects', async () => {
     const service = await json(path.join(profile, 'portal-service.json')).catch(() => null);
     if (service?.bundleId !== bundle.id) return false;
@@ -201,7 +202,7 @@ try {
   });
   await until('installation transaction commits', async () => !(await readdir(profile)).includes('client-install.json'));
   const after = await json(path.join(profile, 'connection.json')), service = await json(path.join(profile, 'portal-service.json'));
-  for (const key of ['endpoint', 'being', 'workspace', 'portalName', 'portalConfigPath', 'backgroundEnabled', 'autoStart', 'allowExec', 'kitsEnabled']) assert.deepEqual(after.settings[key], before.settings[key], key);
+  for (const key of ['endpoint', 'being', 'workspace', 'portalName', 'portalConfigPath', 'backgroundEnabled', 'autoStart', 'allowExec', 'kitsEnabled', 'permissionMode']) assert.deepEqual(after.settings[key], before.settings[key], key);
   assert.equal(sha(await readFile(path.join(service.root, 'heart-portal.exe'))), bundle.sha256);
   const actualBinary = await powershell(`(Get-CimInstance Win32_Process -Filter 'ProcessId=${state.pid}').ExecutablePath`);
   assert.equal(actualBinary.toLowerCase(), path.join(service.root, 'heart-portal.exe').toLowerCase());
@@ -214,7 +215,11 @@ try {
   assert.equal(await readFile(path.join(kits, 'retained.txt'), 'utf8'), 'Existing Kit files');
   assert.equal(await readFile(path.join(profile, 'retained.txt'), 'utf8'), 'Keep user profile');
   assert.equal((await json(path.join(profile, 'appearance.json'))).theme, 'dark');
-  assert.deepEqual((await rpc('tools/list')).tools.map(tool => tool.name).sort(), oldTools);
+  // 0.1.16 adds file copying; historical baselines must retain every old tool
+  // while exposing that addition, without enabling unrelated disabled tools.
+  assert.deepEqual((await rpc('tools/list')).tools.map(tool => tool.name).sort(), [...new Set([...oldTools, 'portal_file_copy'])].sort());
+  assert.notEqual((await rpc('tools/call', { name: 'portal_file_copy', arguments: { path: 'retained.txt', destination: 'after-upgrade-copy.txt' } })).isError, true);
+  assert.equal(await readFile(path.join(workspace, 'after-upgrade-copy.txt'), 'utf8'), '原工作文件');
   assert.notEqual((await rpc('tools/call', { name: 'portal_file_write', arguments: { path: 'after-upgrade.txt', content: '升级后调用成功' } })).isError, true);
   assert.equal(await readFile(path.join(workspace, 'after-upgrade.txt'), 'utf8'), '升级后调用成功');
   const execution = await rpc('tools/call', { name: 'portal_exec', arguments: { command: 'echo portal-upgrade-ok' } });
@@ -287,9 +292,20 @@ try {
   await writeFile(path.join(diagnostics, 'failure.json'), JSON.stringify({
     root, profile, error: { message: error.message, stack: error.stack, code: error.code, signal: error.signal, killed: error.killed },
     clients: await clients().catch(failure => ({ error: String(failure) })),
+    installerProcesses: JSON.parse(await powershell(`
+      ConvertTo-Json -InputObject @(Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -eq 'portal-desktop.exe' -or $_.Name -like '*Setup*' -or $_.Name -eq 'powershell.exe'
+      } | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine) -Compress
+    `)),
     portals: await Promise.all([...ownedProcesses.values()].map(async before => ({ before, after: await processIdentity(before.pid) }))),
     profileCreated: await access(profile).then(() => true, () => false),
   }, null, 2));
+  const updates = path.join(profile, 'client-updates');
+  for (const attempt of await readdir(updates).catch(() => [])) {
+    for (const name of await readdir(path.join(updates, attempt))) {
+      if (/\.(log|json)$/.test(name)) await cp(path.join(updates, attempt, name), path.join(diagnostics, `${attempt}-${name}`));
+    }
+  }
   throw error;
 } finally {
   if (app) await app.close().catch(() => {});

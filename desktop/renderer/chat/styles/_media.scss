@@ -7,23 +7,24 @@
   padding: 10px;
 }
 
-.attachment-code-icon {
-  font-size: 17px;
-  font-weight: 600;
-}
-
 .attachment-file-action {
   display: none;
 }
 
-.attachment-menu summary {
+.attachment-menu-trigger {
   opacity: 0;
   transition: opacity 0.12s;
 }
 
-.attachment-card:hover .attachment-menu summary,
-.attachment-card:focus-within .attachment-menu summary {
+.attachment-card:hover .attachment-menu-trigger,
+.attachment-card:focus-within .attachment-menu-trigger {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .attachment-menu-trigger {
+    opacity: 1;
+  }
 }
 
 .attachment-image-card {
@@ -33,7 +34,8 @@
 
 .attachment-image-thumbnail {
   display: block;
-  width: fit-content;
+  width: var(--attachment-preview-width, fit-content);
+  height: var(--attachment-preview-height, auto);
   max-width: 100%;
   padding: 0;
   border: 1px solid var(--border);
@@ -41,6 +43,48 @@
   overflow: hidden;
   background: var(--bg-soft);
   cursor: zoom-in;
+}
+
+.attachment-image-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 150px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg, #fff);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+
+.attachment-image-context-menu button {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.attachment-image-context-menu button:hover,
+.attachment-image-context-menu button:focus-visible {
+  background: var(--hover-overlay);
+}
+
+.attachment-image-context-menu button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.attachment-image-context-menu p {
+  max-width: 220px;
+  margin: 5px 8px 3px;
+  color: var(--red);
+  font-size: 12px;
 }
 
 .message .content .attachment-image-thumbnail img {
@@ -105,8 +149,11 @@
   min-width: 20px;
   min-height: 20px;
   border-radius: 50%;
-  background: var(--bg) !important;
   font-size: 11px;
+}
+
+:root:not([data-chat-host='desktop']) .pending-file .remove {
+  background: var(--bg) !important;
 }
 
 .pending-file:has(.pending-file-preview) {

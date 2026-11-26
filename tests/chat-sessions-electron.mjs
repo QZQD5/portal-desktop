@@ -1,45 +1,65 @@
 import assert from 'node:assert/strict';
 import { build } from '../scripts/renderer-build.mjs';
 import { browserAssets } from './support/browser-assets.mjs';
-import { mkdtemp, mkdir, copyFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, copyFile, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
-import { waitForChatReady, clickWhenPointerReady } from './support/desktop.mjs';
+import { waitForChatReady } from './support/desktop.mjs';
 
+const budgetReview = process.argv.includes('--budget-review');
+const nativeReport = budgetReview
+  ? JSON.parse(await readFile('test-results/subagent/native-results.json', 'utf8'))
+  : null;
+if (budgetReview) assert.equal(nativeReport?.status === 'passed' && nativeReport.budget?.status === 'done', true);
 const directory = await mkdtemp(path.join(os.tmpdir(), 'portal-chat-sessions-'));
 let application;
-try {
+review: try {
   for (const file of ['loom.html', 'chat.js', 'chat.css', 'highlight.css']) await copyFile(path.resolve('desktop/generated', file), path.join(directory, file));
   await writeFile(path.join(directory, 'index.html'), '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="shell.css"></head><body><div id="root"></div><script src="shell.js"></script></body></html>');
   await build({ plugins: [browserAssets()], stdin: { loader: 'tsx', resolveDir: process.cwd(), contents: `
-    import React, {useRef, useEffect, useSyncExternalStore} from 'react';
+    import React, {useRef, useEffect, useState, useSyncExternalStore} from 'react';
     import {createRoot} from 'react-dom/client';
     import {AppModel} from './desktop/renderer/app/models/app';
     import {EditContextMenu} from './desktop/renderer/shared/components/context-menu';
     import {ChatSceneIndicator} from './desktop/renderer/app/components/chat-scene';
     import {SbsControl} from './desktop/renderer/shared/components/sbs-control';
     import {useChatBridge} from './desktop/renderer/app/hooks/use-chat-bridge';
+    import {SubagentTaskPanel} from './desktop/renderer/app/components/subagent-tasks';
     import './desktop/renderer/app/styles.scss';
     const app = new AppModel(window.beings); app.showReasoning = true; (window as any).fixtureApp = app;
     function Shell() {
       useSyncExternalStore(app.subscribe, app.getVersion);
       const frame = useRef(null); useChatBridge(app, frame);
+      const [tasks, setTasks] = useState([]);
+      const started = useRef(null);
+      function showTask(status) {
+        started.current ??= Date.now();
+        const next = [{id:'budget-fixture',sceneId:app.snapshot.chatScene.scene_id,brief:'预算回归任务',status,createdAt:started.current,turns:${nativeReport?.budget?.turns ?? 0}}];
+        setTasks(next);
+        frame.current.contentWindow.postMessage({type:'beings:scene-tasks',revision:new URL(frame.current.src).searchParams.get('revision'),
+          endpoint:app.snapshot.settings.endpoint,subagentReady:true,tasks:next},'beings://chat');
+      }
       useEffect(() => { window.beings.snapshot().then(value => app.applySnapshot(value)); }, []);
       return <div id="client-main" className="workspace-stage" style={{height:'100vh',width:'100%'}}><header className="topbar">
         <ChatSceneIndicator scene={app.snapshot?.chatScene} sessions={app.snapshot?.chatSessions} connected={true}
           createRequest={app.chatSessionCreateRequest}
           activity={app.chatSceneActivity}
           scope={app.chatHistoryScope} scopeReady={!app.chatLoading && app.chatHistoryScopeKnown}
-          onScope={scope => app.changeChatHistoryScope(scope)} onCopy={() => {}}
+          onScope={scope => app.changeChatHistoryScope(scope)} onCopy={id => { (window as any).copiedSceneId = id; }}
           onSession={(operation,value,sceneId) => app.changeChatSession(operation,value,sceneId)} />
         <SbsControl known={app.sbsKnown} enabled={app.sbsEnabled} origin={app.chatSbsOrigin}
           showContent={app.chatShowSbsMessages} allScenes={app.chatHistoryScope==='all'}
           visibilityReady={!app.chatLoading && app.chatSbsSceneId===app.snapshot?.chatScene?.scene_id}
           onVisibility={show=>app.changeChatSbsVisibility(show)} onToggle={()=>app.toggleSbs()} />
-        <span>同一个 Being · 会话测试</span></header>
+        <span>${budgetReview ? 'Subagent 预算界面测试' : '同一个 Being · 会话测试'}</span></header>
+        {${budgetReview} && <div style={{display:'flex',gap:16,padding:12,zIndex:2}}>
+          {[['运行中','running'],['任务完成','done'],['任务超时','timeout'],['任务取消','cancelled'],['历史预算用尽','budget_exhausted']].map(([label,status])=>
+            <button key={status} onClick={()=>showTask(status)}>{label}</button>)}
+        </div>}
         <section id="chat-view" className="view"><iframe id="chat-frame" ref={frame} src={app.chatSource || undefined} onLoad={() => app.frameLoaded()} /></section>
         <EditContextMenu edit={async () => true} rootSelector="#client-main, dialog[open]" selectionSelector=".reading-text, .dialog-body, #town-body" />
+        {${budgetReview} && app.subagentTaskIds.length > 0 && <SubagentTaskPanel tasks={tasks} details={[]} error="" onRetry={()=>{}} onClose={app.closeSubagentTasks} />}
       </div>;
     }
     createRoot(document.getElementById('root')).render(<Shell />);
@@ -88,62 +108,44 @@ try {
       const snapshot = () => ({settings:{endpoint:connection.endpoint,being:'being',hasToken:true},portal:{phase:'stopped',logs:[]},chatScene:sessions.current(connection.endpoint),chatSessions:sessions.list(connection.endpoint)});
       ipcMain.handle('snapshot',snapshot);
       ipcMain.handle('session',async (_,operation,value,endpoint,sceneId) => { if(endpoint !== connection.endpoint) throw new Error('Wrong Being'); await sessions.change(endpoint,operation,value,sceneId); return snapshot(); });
-      const window = new BrowserWindow({width:1100,height:800,show:true,webPreferences:{preload:${JSON.stringify(path.join(directory,'preload.cjs'))},sandbox:true,contextIsolation:true,nodeIntegration:false}});
+      const window = new BrowserWindow({width:1100,height:800,show:true,title:${JSON.stringify(budgetReview?'Subagent 预算界面测试':'')},webPreferences:{preload:${JSON.stringify(path.join(directory,'preload.cjs'))},sandbox:true,contextIsolation:true,nodeIntegration:false}});
+      if (${budgetReview}) window.on('page-title-updated', event => event.preventDefault());
       await window.loadURL('beings://desktop/');
     });
   ` }, bundle: true, platform: 'node', external: ['electron'], outfile: path.join(directory, 'main.cjs') });
   application = await electron.launch({ args: [path.join(directory,'main.cjs')], env: {...process.env} });
   const page = await application.firstWindow();
+  // Keep animated menu bounds out of the native pointer-readiness checks.
+  await page.emulateMedia({reducedMotion:'reduce'});
   page.setDefaultTimeout(15000);
   const errors=[]; page.on('pageerror',error=>errors.push(error.message));
   const chat = page.frameLocator('iframe');
   await waitForChatReady(page);
   await page.waitForFunction(() => !window.fixtureApp.chatLoading);
+  if (budgetReview) {
+    await chat.getByRole('textbox',{name:'消息输入框'}).fill('子智能体预算本地回归');
+    await chat.getByRole('button',{name:'发送消息'}).click();
+    await chat.getByText('回复：子智能体预算本地回归',{exact:true}).waitFor();
+    console.log('Computer-use Electron fixture ready');
+    await page.waitForEvent('close',{timeout:0});
+    break review;
+  }
   await page.evaluate(async () => {
     const frame = document.querySelector('iframe');
     const snapshot = await window.beings.snapshot();
     frame.contentWindow.postMessage({type:'beings:scene-tasks',revision:new URL(frame.src).searchParams.get('revision'),endpoint:snapshot.settings.endpoint,
       tasks:[],subagentReady:false,subagentConfigured:false,subagentEnabled:false},'beings://chat');
   });
+  // Subagent uses the Being model; stale setup flags must not block either picker.
   const subagentSetup = chat.getByRole('menuitem',{name:/Subagent/});
-  await chat.getByRole('button',{name:'添加附件和工具'}).click();
-  await subagentSetup.waitFor();
-  await clickWhenPointerReady(page, subagentSetup);
-  await page.waitForFunction(() => window.fixtureApp.subagentSettingsOpen === true);
-  await page.evaluate(() => window.fixtureApp.closeSubagentSettings());
-  // Both pickers and direct submissions must open setup without touching the draft or posting.
-  const commandInput = chat.getByRole('textbox',{name:'message input'});
-  for (const trigger of ['plus', 'slash', 'enter', 'send', 'queue']) {
-    const draft = trigger === 'plus' ? '保留已有要求' : trigger === 'slash' ? '/sub' : '/子代理 保留已有要求';
-    // Let the rich editor handle paste through its transaction pipeline.
-    await commandInput.press('ControlOrMeta+a');
-    await commandInput.press('Backspace');
-    await commandInput.evaluate((el, text) => {
-      const clipboardData = new DataTransfer(); clipboardData.setData('text/plain', text);
-      el.dispatchEvent(new ClipboardEvent('paste', {bubbles:true,cancelable:true,clipboardData}));
-    }, draft);
-    if (trigger === 'plus') {
-      await chat.getByRole('button',{name:'添加附件和工具'}).click();
-      await subagentSetup.click();
-    } else if (trigger === 'slash') await commandInput.press('Enter');
-    else if (trigger === 'send') await chat.locator('#send-btn').click();
-    else await commandInput.press(trigger === 'queue' ? 'Control+Enter' : 'Enter');
-    await page.waitForFunction(() => window.fixtureApp.subagentSettingsOpen === true);
-    assert.equal(await commandInput.evaluate(el => el.value ?? el.editor.getMarkdown()),draft,'Setup preserves the existing draft');
-    assert.equal(await application.evaluate(() => globalThis.fixture.requests.length),0,'Unconfigured subagent must not send');
-    assert.equal(await chat.locator('.message.user').count(),0,'Setup must not create a user bubble');
-    await page.evaluate(() => window.fixtureApp.closeSubagentSettings());
-  }
-  await page.evaluate(async () => {
-    const frame = document.querySelector('iframe'), snapshot = await window.beings.snapshot();
-    frame.contentWindow.postMessage({type:'beings:scene-tasks',revision:new URL(frame.src).searchParams.get('revision'),endpoint:snapshot.settings.endpoint,
-      tasks:[],subagentReady:true,subagentConfigured:true,subagentEnabled:true},'beings://chat');
-  });
+  const commandInput = chat.getByRole('textbox',{name:'消息输入框'});
   await commandInput.fill('保留已有要求');
   await chat.getByRole('button',{name:'添加附件和工具'}).click();
   await subagentSetup.click();
   assert.equal(await commandInput.evaluate(el => el.value ?? el.editor.getMarkdown()),'/subagent 保留已有要求');
   assert.equal(await page.evaluate(() => window.fixtureApp.subagentSettingsOpen),false);
+  await commandInput.press('ControlOrMeta+a');
+  await commandInput.press('Backspace');
   await commandInput.fill('/sub');
   await commandInput.press('Tab');
   assert.equal((await commandInput.evaluate(el => el.value ?? el.editor.getMarkdown())).trim(),'/subagent');
@@ -175,13 +177,32 @@ try {
   await page.getByRole('button',{name:'创建并进入'}).click();
   await page.locator('#chat-session-editor').waitFor({state:'hidden'});
   await page.waitForFunction(async () => (await window.beings.snapshot()).chatSessions.length === 2);
+  const discussion = await page.evaluate(async () => (await window.beings.snapshot()).chatScene.scene_id);
+  assert.notEqual(discussion,original);
+  await page.getByLabel('场景列表选项',{exact:true}).click();
+  await page.getByRole('button',{name:'场景详情',exact:true}).click();
+  const currentDetails = page.getByRole('dialog',{name:'当前场景',exact:true});
+  await currentDetails.getByText(discussion,{exact:true}).waitFor();
+  await currentDetails.getByRole('button',{name:'关闭场景详情'}).click();
+  const originalRow = page.getByRole('button',{name:'切换到场景：桌面·测试设备'});
+  await originalRow.click({button:'right'});
+  await page.getByRole('menuitem',{name:'场景详情',exact:true}).and(page.locator(':focus')).waitFor();
+  await page.keyboard.press('Enter');
+  const rowDetails = page.getByRole('dialog',{name:'场景详情',exact:true});
+  await rowDetails.getByText('桌面·测试设备',{exact:true}).waitFor();
+  await rowDetails.getByText(original,{exact:true}).waitFor();
+  await rowDetails.getByText('portal-desktop/test',{exact:true}).waitFor();
+  await rowDetails.getByRole('button',{name:'复制场景 ID'}).click();
+  assert.equal(await page.evaluate(() => window.copiedSceneId),original);
+  assert.equal(await page.evaluate(async () => (await window.beings.snapshot()).chatScene.scene_id),discussion);
+  await page.keyboard.press('Escape');
+  await rowDetails.waitFor({state:'hidden'});
+  await originalRow.and(page.locator(':focus')).waitFor();
   await chat.locator('#input').fill('方案内容');
   await chat.locator('#send-btn').click();
   await chat.getByText('回复：方案内容',{exact:true}).waitFor();
   assert.equal(await visibilityState('isChecked'),false);
   assert.equal(await chat.getByText('SBS 全局测试消息',{exact:true}).count(),0);
-  const discussion = await page.evaluate(async () => (await window.beings.snapshot()).chatScene.scene_id);
-  assert.notEqual(discussion,original);
   await chat.locator('#input').fill('方案草稿');
   await page.getByRole('button',{name:'切换到场景：桌面·测试设备'}).click();
   await chat.locator('#input').waitFor();
@@ -195,9 +216,20 @@ try {
   assert.equal(await chat.locator('#input').evaluate(el => el.value ?? el.editor.getMarkdown()),'方案草稿');
   await page.getByRole('button',{name:'切换到场景：方案讨论'}).click({button:'right'});
   await page.getByRole('menuitem',{name:'重命名',exact:true}).click();
-  await page.getByRole('textbox',{name:'场景名称'}).fill('技术方案');
-  await page.getByRole('button',{name:'保存名称'}).click();
-  await page.locator('#chat-session-editor').waitFor({state:'hidden'});
+  const renameInput = page.getByRole('navigation',{name:'切换场景'}).getByRole('textbox',{name:'场景名称'});
+  await renameInput.waitFor();
+  assert.equal(await page.locator('#chat-session-editor').isVisible(),false);
+  assert.equal(await renameInput.evaluate(input => input === document.activeElement && input.selectionStart === 0 && input.selectionEnd === input.value.length),true);
+  await renameInput.fill('取消这次改名');
+  await renameInput.press('Escape');
+  const discussionRow = page.getByRole('button',{name:'切换到场景：方案讨论'});
+  await discussionRow.waitFor();
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '切换到场景：方案讨论');
+  await discussionRow.click({button:'right'});
+  await page.getByRole('menuitem',{name:'重命名',exact:true}).click();
+  await renameInput.fill('技术方案');
+  await renameInput.press('Enter');
+  await renameInput.waitFor({state:'hidden'});
   const persisted = await page.evaluate(() => window.beings.snapshot());
   assert.equal(persisted.chatScene.scene_id,discussion);
   assert.equal(persisted.chatScene.scene_meta.scene_label,'技术方案');
@@ -250,7 +282,7 @@ try {
   await page.waitForFunction(scene => !window.fixtureApp.chatLoading && window.fixtureApp.snapshot.chatScene.scene_id === scene, original);
   await chat.locator('#input').fill('并发 A');
   await chat.locator('#send-btn').click();
-  await chat.getByText('【新消息来自 scene「桌面·测试设备 · ID: '+original+'」】',{exact:true}).waitFor();
+  await chat.locator('.message.user').getByText('并发 A',{exact:true}).waitFor();
   const emit = async (scene, text, close = false) => application.evaluate((_, {scene,text,close}) => {
     const stream = globalThis.fixture.streams.get(scene);
     assertStream(stream);
@@ -284,7 +316,10 @@ try {
   const queuedScene = await page.evaluate(async () => (await window.beings.snapshot()).chatScene.scene_id);
   const localQueueStatus = chat.locator('.composer-queue-item').filter({hasText:'排队 C'});
   await localQueueStatus.waitFor();
-  assert.equal(await localQueueStatus.getByRole('button',{name:'调整方向',exact:true}).isDisabled(),true,'Cannot interrupt another scene');
+  await localQueueStatus.getByRole('button',{name:'编辑消息：排队 C',exact:true}).and(chat.locator(':enabled')).waitFor();
+  assert.equal(await localQueueStatus.getByRole('button',{name:'引导',exact:true}).count(),0,'Cannot steer another scene');
+  assert.ok(await localQueueStatus.getByRole('button',{name:'编辑消息：排队 C',exact:true}).isEnabled());
+  assert.ok(await localQueueStatus.getByRole('button',{name:'取消排队：排队 C',exact:true}).isEnabled());
   assert.equal(await chat.locator('#messages .message.user').filter({hasText:'排队 C'}).count(),0,'Unsent queue stays beside the composer');
   await page.locator(`[data-scene-id="${queuedScene}"] [data-status="queued"]`).waitFor();
   await page.screenshot({animations:'disabled',path:'test-results/chat-sessions-activity.png'});
@@ -311,14 +346,14 @@ try {
     assert.ok(i < 300, 'C must dispatch after B finishes'); await new Promise(resolve => setTimeout(resolve,20));
   }
   await page.locator(`[data-scene-id="${discussion}"] [data-status="done"]`).waitFor();
-  await chat.getByText('消息已接收，正在切换到当前对话…',{exact:true}).waitFor();
+  await chat.getByText('消息已接收',{exact:true}).waitFor();
   await page.locator(`[data-scene-id="${queuedScene}"] [data-status="queued"]`).waitFor();
   await application.evaluate((_,sceneId) => {
     const history = globalThis.fixture.history;
     history.push({seq:history.length+1,role:'being',content:'C 排队回复完成',scene_id:sceneId,at:new Date().toISOString()});
   },queuedScene);
   await chat.getByText('C 排队回复完成',{exact:true}).waitFor();
-  await chat.getByText('已回复',{exact:true}).waitFor();
+  await chat.locator('.chat-run .run-label').filter({hasText:/^用时 /}).waitFor();
   assert.equal(await page.locator(`[data-scene-id="${queuedScene}"] [data-status="done"]`).count(),0);
   await page.getByRole('button',{name:'切换到场景：技术方案'}).click();
   await page.locator(`[data-scene-id="${discussion}"] [data-status="done"]`).waitFor({state:'hidden'});
@@ -340,9 +375,9 @@ try {
   await page.getByRole('menu',{name:'场景操作'}).waitFor();
   assert.equal(await page.getByRole('menu',{name:'编辑菜单'}).count(),0,'Session context menu must suppress the global edit menu');
   await page.getByRole('menuitem',{name:'重命名',exact:true}).click();
-  await page.getByRole('textbox',{name:'场景名称'}).fill('旧会话');
+  await renameInput.fill('旧会话');
   await page.getByRole('button',{name:'保存名称'}).click();
-  await page.locator('#chat-session-editor').waitFor({state:'hidden'});
+  await renameInput.waitFor({state:'hidden'});
   assert.equal(await page.evaluate(async () => (await window.beings.snapshot()).chatScene.scene_id),discussion);
   const oldScene = page.getByRole('button',{name:'切换到场景：旧会话'});
   await oldScene.click({button:'right'});
@@ -366,6 +401,7 @@ try {
   const replacement = await page.evaluate(async () => (await window.beings.snapshot()).chatScene.scene_id);
   assert.notEqual(replacement,discussion);
   await page.reload();
+  await waitForChatReady(page);
   await page.getByRole('button',{name:'收起场景列表',exact:true}).waitFor();
   await page.getByRole('button',{name:'切换到场景：新场景'}).waitFor();
   assert.equal(await page.evaluate(async () => (await window.beings.snapshot()).chatScene.scene_id),replacement);
@@ -397,9 +433,12 @@ try {
   assert.equal(await chat.locator('.message.user').filter({hasText:'Bound scene message'}).count(),1);
   assert.equal((await application.evaluate(() => globalThis.fixture.requests)).at(-1).scene_id,'feishu-shared');
   await page.reload();
+  await waitForChatReady(page);
   await page.getByRole('button',{name:'收起场景列表',exact:true}).waitFor();
   await page.getByRole('button',{name:'切换到场景：跨客户端场景'}).waitFor();
   assert.equal((await page.evaluate(() => window.beings.snapshot())).chatScene.scene_id,'feishu-shared');
+  await page.waitForFunction(() => !window.fixtureApp.chatLoading);
+  await chat.locator('.message.user').filter({hasText:'Bound scene message'}).waitFor();
   // Scheduling is inspectable process metadata, never inline conversation prose.
   const wire = '独立问题\n\n[Desktop 场景调度提示]\n当前输入属于 scene_id="feishu-shared"。本客户端其他场景尚在处理或等待回复：\n[{"scene_id":"background-a"}]\n[/Desktop 场景调度提示]';
   // Preserve transport metadata verbatim instead of typing it through Markdown serialization.
@@ -412,13 +451,9 @@ try {
   await visibleQuestion.waitFor();
   assert.equal(await visibleQuestion.locator('.content').innerText(), '独立问题');
   assert.equal(await visibleQuestion.locator('.scene-scheduling').count(), 0);
-  const schedulingRun = visibleQuestion.locator('xpath=following-sibling::details[contains(@class,"run-activity")][1]');
-  await schedulingRun.waitFor();
-  assert.equal(await schedulingRun.getAttribute('open'), null);
-  assert.equal(await schedulingRun.locator('.scene-scheduling').count(), 0, 'Collapsed activity does not mount process details');
-  await schedulingRun.locator(':scope > summary').click();
-  await schedulingRun.locator('.scene-scheduling').waitFor();
-  assert.match(await schedulingRun.locator('.scene-scheduling pre').textContent(), /background-a/);
+  const schedulingRun = visibleQuestion.locator('xpath=following-sibling::div[@class="chat-run"][1]');
+  await schedulingRun.locator('.run-summary').waitFor();
+  assert.equal(await schedulingRun.locator('.scene-scheduling').count(), 0, 'Transport hints do not create process rows');
   const pushTasks = async status => page.evaluate(async status => {
     const frame = document.querySelector('iframe');
     const snapshot = await window.beings.snapshot();
@@ -427,19 +462,21 @@ try {
   },status);
   await pushTasks('running');
   assert.equal(await chat.getByText('尚未配置 · 点击配置模型',{exact:true}).count(),0);
-  await page.getByRole('button',{name:'切换到场景：跨客户端场景'}).getByText('执行中').waitFor();
-  if (await schedulingRun.getAttribute('open') === null) await schedulingRun.locator('summary').click();
-  await chat.locator('.scene-task-list').getByText('后台执行中',{exact:true}).waitFor();
+  const runningScene = page.getByRole('button',{name:'切换到场景：跨客户端场景'});
+  await runningScene.locator('.chat-session-activity[data-status="working"]').waitFor();
+  assert.equal(await runningScene.getAttribute('aria-description'),'执行中');
+  await schedulingRun.locator(':scope > details > summary').click();
+  await schedulingRun.locator('.run-subagent-status').getByText('1 项运行中',{exact:true}).waitFor();
   await page.screenshot({animations:'disabled',path:'test-results/scene-scheduling-running.png'});
   await pushTasks('done');
-  await schedulingRun.getByText('后台已完成，尚未收到回复',{exact:true}).waitFor();
-  assert.equal((await schedulingRun.getAttribute('class')).includes('running'),false);
-  assert.equal(await schedulingRun.locator('.run-elapsed').isVisible(),false);
+  await schedulingRun.locator('.run-subagent-status').getByText('全部完成',{exact:true}).waitFor();
+  await runningScene.locator('.chat-session-activity[data-status="waiting"]').waitFor();
+  assert.equal(await schedulingRun.locator('details.run-activity.running').count(),0,'Child tasks do not reopen a completed parent run');
   await page.screenshot({animations:'disabled',path:'test-results/scene-scheduling-awaiting-reply.png'});
   await pushTasks('failed');
-  await schedulingRun.locator('.run-label').filter({hasText:'后台任务异常'}).waitFor();
-  if (await schedulingRun.getAttribute('open') === null) await schedulingRun.locator(':scope > summary').click();
-  await chat.locator('.scene-task-list').getByText('模型鉴权失败，请检查 subagent 密钥',{exact:true}).waitFor();
+  await schedulingRun.locator('.run-subagent-status').getByText('1 项失败',{exact:true}).waitFor();
+  await runningScene.locator('.chat-session-activity[data-status="task-failed"]').waitFor();
+  assert.equal(await schedulingRun.getByRole('button',{name:'查看子智能体执行详情'}).count(),1);
   await page.screenshot({animations:'disabled',path:'test-results/scene-scheduling-failed.png'});
   if (!await sbsVisibility.isVisible()) await page.getByLabel('SBS 状态与显示设置',{exact:true}).click();
   await sbsVisibility.check();

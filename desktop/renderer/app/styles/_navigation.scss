@@ -261,10 +261,9 @@ body[data-view='chat'].has-topic .scene-ribbon {
 #place-panel #view-title {
   display: block;
   font:
-    600 26px/1.4 Georgia,
-    'Songti SC',
-    serif;
-  letter-spacing: 0;
+    500 20px/28px 'Being Noto Sans SC',
+    var(--font-sans);
+  letter-spacing: -0.3px;
   margin: 0;
   overflow-wrap: anywhere;
 }
@@ -307,7 +306,9 @@ body[data-view='chat'].has-topic .scene-ribbon {
   opacity: 0;
   transform: translateY(8px) scale(0.98);
   transform-origin: bottom right;
-  transition: opacity 220ms ease, transform 240ms cubic-bezier(0.2, 0.75, 0.25, 1);
+  transition:
+    opacity 220ms ease,
+    transform 240ms cubic-bezier(0.2, 0.75, 0.25, 1);
 
   &[data-open='true'] {
     opacity: 1;
@@ -406,22 +407,6 @@ body[data-view='chat'].has-topic .scene-ribbon {
   color: var(--muted);
   padding: 0 10px;
   margin: 10px 0 0;
-}
-
-.welcome-connect {
-  width: auto;
-  min-height: 0;
-  gap: 28px;
-  padding: 12px 18px;
-  border-radius: 24px;
-  box-shadow: none;
-}
-
-.welcome-connect-arrow {
-  width: 24px;
-  height: 24px;
-  font-size: 14px;
-  border-radius: 50%;
 }
 
 @media (max-width: 640px) {

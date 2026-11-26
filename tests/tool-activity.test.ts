@@ -5,6 +5,11 @@ import type { ActivityEntry } from '../desktop/renderer/chat/models/chat';
 const start = (id?: string, name = 'portal_exec') => newToolActivity([], { call_id: id, name, input: { command: 'echo hello' } }, `row-${id}`, 1)!;
 
 describe('tool activity identity and details', () => {
+  it('shows the recovery action returned by Portal for a failed execution', () => {
+    const entries=[start('timeout')];
+    completeToolActivity(entries,{call_id:'timeout',result:{isError:true,content:[{type:'text',text:'partial output\nCommand timed out'}],next_action:'长任务使用 background=true'}});
+    expect(entries[0]).toMatchObject({error:true,resultDetail:'partial output\nCommand timed out',nextAction:'长任务使用 background=true'});
+  });
   it('pairs concurrent calls by identity, ignoring duplicates and unknown result ids', () => {
     const entries = [start('a'), start('b')];
     completeToolActivity(entries, { tool_use_id: 'a', content: 'first', is_error: false });
@@ -26,6 +31,21 @@ describe('tool activity identity and details', () => {
     completeToolActivity(entries, { content: 'only remaining result' });
     expect(entries[1].resultDetail).toBe('only remaining result');
     expect(completeToolActivity([start(), start()], { name: 'portal_exec' })).toBeUndefined();
+  });
+
+  it('correlates Portal camel-case identities with snake-case events', () => {
+    const entry = newToolActivity([], { toolCallId: 'a', name: 'portal_exec' }, 'row-a', 1)!;
+    expect(completeToolActivity([entry, start('b')], { tool_use_id: 'a', content: 'ok' })).toBe(entry);
+    expect(completeToolActivity([start('c'), start('d')], { toolCallId: 'd', isError: true })).toMatchObject({ toolCallId: 'd', error: true });
+  });
+
+  it('links an identified result to a unique call whose start omitted its identity', () => {
+    const namelessId = start(undefined, 'read');
+    const entries = [namelessId, start('write-id', 'write')];
+    const result = { tool_call_id: 'read-id', name: 'read', content: 'ok' };
+    expect(completeToolActivity(entries, result)).toMatchObject({ toolCallId: 'read-id', done: true });
+    expect(completeToolActivity(entries, result)).toBeUndefined();
+    expect(completeToolActivity([start(), start('other')], { tool_call_id: 'unknown' })).toBeUndefined();
   });
 
   it('preserves structured MCP errors and bounds long details without losing the final error', () => {

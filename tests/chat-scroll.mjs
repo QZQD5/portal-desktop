@@ -17,7 +17,10 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/api/history') return json({ messages: history });
   if (url.pathname === '/api/status') return json({ being_name: 'Willow' });
   if (url.pathname === '/api/llm/config') return json({ sbs_enabled: false });
-  if (url.pathname === '/api/stream/active') { response.writeHead(204); response.end(); return; }
+  if (url.pathname === '/api/stream/active') {
+    if (heldResponse && !heldResponse.writableEnded) return json({ stream_id: 'scroll-fixture', scene_id: 'desktop-fixture', origin: 'human', finished: false, next_seq: 1, events: [] });
+    response.writeHead(204); response.end(); return;
+  }
   if (url.pathname === '/api/chat/stream') {
     for await (const chunk of request) {} // Consume the request before holding the stream open.
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -57,13 +60,32 @@ try {
   await frame.locator('.message.user').nth(11).waitFor();
   await post({type:'beings:chat-top-inset',value:topInset});
   await child().waitForFunction(value => document.querySelector('.chat-root').style.getPropertyValue('--chat-top-inset') === `${value}px`, topInset);
+  await child().waitForFunction(() => performance.getEntriesByName('loom:ready').length > 0);
+  await child().evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const jump=frame.locator('#chat-jump-latest');
+  await jump.waitFor({state:'hidden'});
+  // Moving through the bottom whitespace does not hide any message.
+  await frame.locator('#messages').evaluate(el=>{
+    const tail=el.lastElementChild.getBoundingClientRect().bottom;
+    const bottom=document.querySelector('#input-area').getBoundingClientRect().top;
+    el.scrollTop-=Math.min(12,(bottom-tail)/2);
+  });
+  await page.waitForTimeout(100);
+  assert.equal(await jump.isVisible(),false,'Latest stays hidden while the last message is fully visible');
+  // Reveal the shortcut once the last message actually passes behind the composer.
+  await frame.locator('#messages').evaluate(el=>{
+    const tail=el.lastElementChild.getBoundingClientRect().bottom;
+    const bottom=document.querySelector('#input-area').getBoundingClientRect().top;
+    el.scrollTop-=bottom-tail+12;
+  });
+  await jump.waitFor({state:'visible'});
+  await jump.click();
   await jump.waitFor({state:'hidden'});
   await frame.locator('#messages').evaluate(el=>{
     const nodes=el.querySelectorAll('.message');
-    el.scrollTop+=nodes[nodes.length-11].getBoundingClientRect().bottom-el.getBoundingClientRect().top-el.clientHeight+1;
+    el.scrollTop+=nodes[nodes.length-11].getBoundingClientRect().bottom-document.querySelector('#input-area').getBoundingClientRect().top+1;
   });
-  await child().waitForFunction(()=>document.querySelector('#chat-jump-latest').textContent==='10条消息');
+  await child().waitForFunction(()=>document.querySelector('#chat-jump-latest').getAttribute('aria-description')==='下方还有10条消息');
   assert.equal(await jump.evaluate(node=>getComputedStyle(node).borderWidth),'0px');
   await mkdir('test-results',{recursive:true});
   await page.screenshot({path:'test-results/chat-jump-muse-light.png'});
@@ -72,9 +94,9 @@ try {
   await child().evaluate(()=>document.documentElement.dataset.theme='light');
   await page.setViewportSize({width:435,height:746});
   await child().waitForFunction(()=>{
-    const el=document.querySelector('#messages'),bottom=el.getBoundingClientRect().top+el.clientHeight;
+    const el=document.querySelector('#messages'),bottom=document.querySelector('#input-area').getBoundingClientRect().top;
     const count=[...el.querySelectorAll('.message')].filter(node=>node.getBoundingClientRect().bottom>bottom+2).length;
-    return document.querySelector('#chat-jump-latest').textContent===`${count}条消息`;
+    return document.querySelector('#chat-jump-latest').getAttribute('aria-description')===(count?`下方还有${count}条消息`:null);
   });
   const bounds=await jump.boundingBox();assert.ok(bounds.x>=0&&bounds.x+bounds.width<=435);
   await page.screenshot({path:'test-results/chat-jump-muse-narrow.png'});
@@ -98,8 +120,15 @@ try {
   await frame.getByText('跟随测试段落 29').waitFor();
   const expectBottom = async label => {
     const gap = await messages.evaluate(async el => {
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      return el.scrollHeight - el.scrollTop - el.clientHeight;
+      // Streaming renders and ResizeObserver can span more than two frames on
+      // hosted runners. Wait for the actual pinned position, without scrolling.
+      const deadline = performance.now() + 2000;
+      let gap;
+      do {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      } while (Math.abs(gap) >= 2 && performance.now() < deadline);
+      return gap;
     });
     assert.ok(Math.abs(gap) < 2, `${label}: bottom gap ${gap}`);
   };
@@ -143,7 +172,7 @@ try {
   for (let i = 0; i < 5; i++) {
     event(heldResponse, 'content_block_delta', { delta: { text: `\n\n滚动回归段落 ${i}` } });
     await frame.getByText(`滚动回归段落 ${i}`, { exact: true }).waitFor();
-    assert.match(await jump.innerText(),/^(1条消息|最新消息)$/,'Streaming text in the same bubble does not increment the message count');
+    assert.match((await jump.getAttribute('aria-description')) || '',/^(下方还有1条消息|)$/,'Streaming text in the same bubble does not increment the message count');
     assert.ok(Math.abs(await messages.evaluate(el => el.scrollTop) - readingTop) < 2,
       'Streaming must preserve the reading position after a small upward scroll');
   }
@@ -166,8 +195,7 @@ try {
   await child().waitForFunction(()=>{const el=document.querySelector('#messages');return el.scrollHeight-el.scrollTop-el.clientHeight<2;});
   event(heldResponse, 'content_block_delta', { delta: { text: '\n\n恢复跟随底部' } });
   await frame.getByText('恢复跟随底部', { exact: true }).waitFor();
-  assert.ok(await messages.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2),
-    'Returning to latest resumes following streamed output');
+  await expectBottom('Returning to latest resumes following streamed output');
 
   // A tiny upward gesture still belongs to the reader; a downward gesture at
   // the floor must not turn off following when it produces no scroll event.
@@ -212,6 +240,9 @@ try {
   // Chromium touch input exercises the real native scrolling path.
   const touch = await page.context().newCDPSession(page);
   await touch.send('Emulation.setTouchEmulationEnabled', {enabled:true,maxTouchPoints:1});
+  // A coarse pointer changes message layout. Measure the start of the gesture after reflow.
+  await child().waitForFunction(() => matchMedia('(pointer: coarse)').matches);
+  await expectBottom('Touch emulation reflow stays pinned before the gesture');
   const box = await messages.boundingBox();
   const x = Math.round(box.x + box.width / 2), y = Math.round(box.y + box.height / 3);
   const touchBefore = await messages.evaluate(el => el.scrollTop);
@@ -245,8 +276,9 @@ try {
   event(heldResponse, 'message_stop', {});
   await browser.contexts()[0].grantPermissions(['clipboard-read', 'clipboard-write']);
   const copyTarget = frame.locator('.message.being:not(.thinking-indicator):not(.consecutive)').last();
-  await copyTarget.hover();
-  await copyTarget.getByRole('button', { name: '复制正文', exact: true }).click();
+  const copy = copyTarget.getByRole('button', { name: '复制正文', exact: true });
+  await copy.focus();
+  await copy.press('Enter');
   await copyTarget.getByRole('button', { name: '已复制', exact: true }).waitFor();
   assert.match(await child().evaluate(() => navigator.clipboard.readText()), /开始回复/);
   assert.deepEqual(errors, []);

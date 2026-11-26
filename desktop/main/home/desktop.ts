@@ -8,13 +8,16 @@ import { registerHomeIpc } from './ipc';
 import { HomeService } from './service';
 import { HomeViewer } from './viewer';
 import { HomeConnectors } from './connectors';
+import type { ConnectorNetwork } from './network';
+import type { HomeViewerLog } from './transport';
 export async function createDesktopHome(options: {
   directory: string; assets: string; secretStorage: SecretStorage; store: SettingsStore;
-  window(): BrowserWindow | null; handle: RegisterHandler;
+  window(): BrowserWindow | null; handle: RegisterHandler; network: ConnectorNetwork;
+  log: HomeViewerLog;
 }) {
   const { directory, secretStorage, store, window: getWindow, handle } = options;
   const homeClient = new HomeClient(directory, secretStorage, url => shell.openExternal(url));
-  const homeViewer = new HomeViewer(getWindow, viewer => home?.update({ viewer }), options.assets);
+  const homeViewer = new HomeViewer(getWindow, viewer => home?.update({ viewer }), options.assets, options.log);
   const home = new HomeService(homeClient, homeViewer, () => store.connection, state => {
     const window = getWindow();
     if (window && !window.isDestroyed()) window.webContents.send('beings:home-state', state);
@@ -30,6 +33,6 @@ export async function createDesktopHome(options: {
     },
   });
   const connectors = new HomeConnectors(homeClient, url => shell.openExternal(url));
-  registerHomeIpc(handle, home, homeViewer, homeFiles, connectors);
-  return home;
+  registerHomeIpc(handle, home, homeViewer, homeFiles, connectors, options.network);
+  return { home, connectors };
 }

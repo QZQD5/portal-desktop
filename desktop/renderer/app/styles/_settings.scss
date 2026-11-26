@@ -403,12 +403,14 @@
 
 .connector-toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 20px;
 }
 
 .connector-search {
   flex: 1;
+  min-width: 160px;
 }
 
 .connector-search input {
@@ -418,6 +420,33 @@
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface);
+}
+
+.connector-runtime-filter {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.connector-runtime-filter button {
+  border: 0;
+  border-right: 1px solid var(--line);
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--secondary);
+}
+
+.connector-runtime-filter button:last-child {
+  border-right: 0;
+}
+
+.connector-runtime-filter button.selected {
+  background: var(--selected);
+  color: var(--text);
 }
 
 .connector-toolbar > button {
@@ -443,21 +472,6 @@
   gap: 12px;
 }
 
-.connector-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 90px;
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface);
-}
-
-.connector-card.is-clickable {
-  cursor: pointer;
-}
-
 .connector-card-icon {
   display: grid;
   place-items: center;
@@ -471,33 +485,12 @@
   font-weight: 700;
 }
 
-.connector-card-copy {
-  display: grid;
-  flex: 1;
-  gap: 3px;
-  min-width: 0;
+.connector-card-icon img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
 }
 
-.connector-card-copy strong {
-  font-size: 14px;
-}
-
-.connector-card-copy small,
-.connector-card-copy em {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.connector-card-copy em {
-  color: var(--accent);
-  font-style: normal;
-}
-
-.connector-card > button,
 .connector-installed-actions > button,
 .connector-connect-panel > button,
 .connector-flow > button {
@@ -507,13 +500,6 @@
   background: var(--control);
   color: var(--text);
   font-size: 12px;
-}
-
-.connector-card > button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
 }
 
 .connector-connect-panel {

@@ -24,7 +24,7 @@ function PluginLibrary({ town }: { town: TownModel }) {
     </div>
     <div id="plugin-library-dsh" role="tabpanel" aria-labelledby="plugin-type-dsh" hidden={kind !== 'dsh'}>{kind === 'dsh' && <div className="dsh-library-host" ref={dshRuntime.setManagerHost} />}</div>
     <div id="plugin-library-town" role="tabpanel" aria-labelledby="plugin-type-town" hidden={kind !== 'town'}>
-      <div className="town-plugin-toolbar"><p>管理 Town 插件与本地扩展</p><input type="search" aria-label="搜索 Town 插件" placeholder="搜索 Town 插件…" value={town.search} onChange={event => town.setSearch(event.target.value)} /><label className="tools-local-filter"><input type="checkbox" checked={town.localOnly} onChange={event => { town.localOnly = event.target.checked; town.offset = 0; town.changed(); }} />仅本机存在</label>{town.plugins?.api && <button className="primary" disabled={town.plugins.busy} onClick={() => void town.plugins!.act(() => town.plugins!.api!.importLocal())}>导入插件目录</button>}{town.plugins && <button className="secondary" onClick={() => town.plugins!.showCommands(true)}>快捷操作</button>}</div>
+      <div className="town-plugin-toolbar"><p>管理 Town 插件与本地扩展</p><input type="search" aria-label="搜索 Town 插件" placeholder="搜索 Town 插件…" value={town.search} onChange={event => town.setSearch(event.target.value)} /><label className="tools-local-filter"><input type="checkbox" checked={town.localOnly} onChange={event => town.setLocalOnly(event.target.checked)} />仅本机存在</label>{town.plugins?.api && <button className="primary" disabled={town.plugins.busy} onClick={() => void town.plugins!.act(() => town.plugins!.api!.importLocal())}>导入插件目录</button>}{town.plugins && <button className="secondary" onClick={() => town.plugins!.showCommands(true)}>快捷操作</button>}</div>
       <ToolCatalog town={town} /><div className="plugin-library-pagination"><Pagination town={town} /></div>
     </div>
   </div>;
@@ -32,6 +32,7 @@ function PluginLibrary({ town }: { town: TownModel }) {
 
 function ToolCatalog({ town }: { town: TownModel }) {
   const { items: visible } = toolPage(town);
+  const filtered = town.search || town.groveStatus || town.localOnly || ['app', 'kit'].includes(town.groveKind);
   const selected = town.toolSelection;
   const entry = visible.find(item => item.key === selected) || (town.localKit ? visible.find(item => item.kit?.name === town.localKit?.name) : undefined) || visible[0];
   const remoteId = entry?.remote && !entry.kit && !entry.plugin ? str(entry.remote.id) : undefined;
@@ -57,7 +58,12 @@ function ToolCatalog({ town }: { town: TownModel }) {
           <strong className="catalog-title">{item.name}</strong><p>{item.description}</p>
           <span className="grove-tag-row"><span className="mini-tag">{{ app: 'App', kit: 'Kit', plugin: 'Plugin' }[item.kind]}</span>{item.local && <span className="mini-tag">✓ 本机存在</span>}{item.plugin && <span className="mini-tag">{item.plugin.enabled ? '已启用' : '已停用'}</span>}</span>
         </button>)}
-        {!visible.length && <p className="empty-inline">{town.groveKind === 'plugin' ? '尚未安装插件。' : '没有符合筛选条件的工具。'}{town.loading && !town.localOnly && ' 正在读取 Grove…'}</p>}
+        {!visible.length && (town.loading && !town.localOnly
+          ? <p className="empty-inline" role="status">正在读取 Grove…</p>
+          : <div className="feed-empty">
+            <strong>{filtered ? '没有符合筛选条件的工具。' : '工具库暂无内容'}</strong>
+            <p>{filtered ? '试试其他关键词或筛选条件。' : '刷新后再查看 Grove 工具。'}</p>
+          </div>)}
       </div>
       <div className="catalog-detail">
         {entry?.plugin && town.plugins ? <PluginCard model={town.plugins} plugin={entry.plugin} /> : entry?.kit ? <LocalKitDetail town={town} kit={entry.kit} /> : entry?.remote ? <CatalogDetail key={remoteId} town={town} expectedId={remoteId} /> : entry?.app ? <><h2>{entry.name}</h2><p>{entry.description}</p><code className="local-path">{entry.app.path}</code></> : <p className="detail-placeholder">选择工具，查看详情与可用操作。</p>}

@@ -191,6 +191,10 @@ button.step2-back {
   min-width: 0;
 }
 
+.message-action-space {
+  display: contents;
+}
+
 /* The row owns the width limit; do not apply the role's percentage again inside it. */
 .message:is(.user, .being, .system) .message-bubble-body > .content,
 .message .message-bubble-body > .intelligent-answer > .content {
@@ -227,18 +231,44 @@ button.step2-back {
   line-height: 1.65;
 }
 
+.scene-task-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
 .scene-scheduling h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   margin: 0;
+  color: var(--text, #30352f);
   font: inherit;
-  font-weight: 500;
+  font-weight: 600;
+}
+
+.scene-task-summary {
+  flex: none;
+  color: var(--muted, #838b83);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.scene-task-summary.has-failures {
+  color: var(--red, #b96859);
 }
 
 .run-activity .scene-scheduling {
   margin: 12px 0 16px 24px;
 }
 
-.scene-scheduling > p {
-  margin: 10px 0;
+.scene-scheduling > p.scene-task-note {
+  margin: 8px 0 10px;
+  color: var(--muted, #838b83);
+  font-size: 12px;
 }
 
 .scene-scheduling pre {
@@ -256,13 +286,54 @@ button.step2-back {
 }
 
 .scene-task-list li {
-  padding: 9px 0;
+  padding: 10px 0;
 }
 
-.scene-task-list small {
-  display: block;
+.scene-task-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 10px;
+}
+
+.scene-task-row time {
+  grid-column: 2;
   overflow-wrap: anywhere;
-  opacity: 0.8;
+  color: var(--muted, #838b83);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.scene-task-status,
+.scene-task-brief {
+  display: block;
+}
+
+.scene-task-brief {
+  color: var(--text, #30352f);
+  font-weight: 500;
+}
+
+.scene-task-status {
+  color: var(--muted, #838b83);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.scene-task-list li[data-status='running'] .scene-task-status,
+.scene-task-list li[data-status='queued'] .scene-task-status {
+  color: var(--accent, #286197);
+}
+
+.scene-task-list
+  li:is(
+    [data-status='failed'],
+    [data-status='cancelled'],
+    [data-status='interrupted'],
+    [data-status='budget_exhausted'],
+    [data-status='timeout']
+  )
+  .scene-task-status {
+  color: var(--red, #b96859);
 }
 
 .scene-task-error {
@@ -323,4 +394,90 @@ label.chat-scope-switch input {
   accent-color: var(--accent);
 }
 
-/* Interrupted prose stays readable; the turn status is shown once below it. */
+.message-hover-actions {
+  position: relative;
+  flex: 0 0 56px;
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  color: var(--text-muted);
+  opacity: 0;
+  pointer-events: none;
+
+  @media (prefers-reduced-motion: no-preference) {
+    transition: opacity 0.15s;
+  }
+}
+
+.message-bubble-row:focus-within .message-hover-actions,
+.message-bubble-row:has(
+    .message-bubble-body:hover,
+    .message-hover-actions:hover,
+    .message-more[aria-expanded='true']
+  )
+  .message-hover-actions {
+  opacity: 1;
+  pointer-events: auto;
+
+  &::before {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 100%;
+    width: 8px;
+    content: '';
+  }
+}
+
+.message.user .message-hover-actions::before {
+  inset-inline: 100% auto;
+}
+
+.message-hover-time {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.message-hover-buttons {
+  display: flex;
+  align-items: center;
+
+  button {
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    padding: 6px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    pointer-events: inherit;
+
+    &:hover {
+      background: var(--bg-soft);
+    }
+    &:focus-visible {
+      outline: 2px solid var(--accent);
+    }
+  }
+}
+
+.message-more {
+  display: grid;
+  place-items: center;
+}
+
+@media (hover: none) {
+  .message-hover-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .message-hover-time {
+    display: none;
+  }
+}

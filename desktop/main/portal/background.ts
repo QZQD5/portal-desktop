@@ -9,7 +9,8 @@ import { portalArguments, portalConfig } from './supervisor';
 import { readPortalSample, readPortalReady, portalSampleState } from './status';
 import type { BackgroundState, PortalState, Settings } from '../../shared/types';
 import { permissionMode } from '../../shared/security';
-import { windowsEnvironment, windowsExecutable } from './windows';
+import { windowsEnvironment, windowsExecutable, windowsSandboxCancellation } from './windows';
+import { ensurePortalRuntime, portalRuntimeId } from './task-runtime';
 import { windowsLogCopy } from './windows-log-copy';
 
 // No shell interpolation or credentials in command arguments. Windows DPAPI input uses stdin.
@@ -58,11 +59,11 @@ export async function portableCommand(binary: string, action: 'stop' | 'status' 
 }
 const xml = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 16);
-export interface Service { label: string; file: string; root: string; existing: boolean; kind?: 'portable'; login?: boolean; name?: string; beingEndpoint?: string; environmentPath?: string; environment?: Record<string, string>; fingerprint?: string; bundleId?: string; configPath?: string; generatedConfig?: boolean; cwd?: string; binary?: string }
+export interface Service { label: string; file: string; root: string; existing: boolean; kind?: 'portable'; login?: boolean; name?: string; beingEndpoint?: string; environmentPath?: string; environment?: Record<string, string>; fingerprint?: string; bundleId?: string; runtimeId?: string; configPath?: string; generatedConfig?: boolean; cwd?: string; binary?: string }
 export function fingerprint(settings: Settings, connection: Connection) {
   return hash(JSON.stringify([connection.link, settings.portalBinary, settings.portalConfigPath, settings.portalName,
     settings.workspace, settings.portalEnvironmentPath, settings.allowExec, settings.kitsEnabled,
-    permissionMode(settings.permissionMode), 'client-tools-v7-bounded-logs']));
+    permissionMode(settings.permissionMode), 'client-tools-v8-explicit-consent']));
 }
 export function launchAgent(label: string, root: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>
@@ -360,7 +361,11 @@ if ([string]$t.State -eq 'Running' -and (Test-Path -LiteralPath $pidFile)) {
       ? await readFile(path.join(previous.root, this.platform === 'win32' ? 'heart-portal.exe' : 'heart-portal'))
         .catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return null; throw error; })
       : null;
-    if (previous && installedBytes?.equals(sourceBytes)) {
+    const runtimeId = await portalRuntimeId(settings.portalBinary);
+    const runtime = runtimeId ? await ensurePortalRuntime(settings.portalBinary, this.directory, runtimeId) : undefined;
+    const installedRuntimeId = previous?.runtimeId;
+    if (previous && installedBytes?.equals(sourceBytes) && runtimeId === installedRuntimeId &&
+        (!runtime || previous.environment?.HEART_PORTAL_RUNTIME_DIR === runtime)) {
       await this.load(previous); return this.refresh();
     }
     await access(settings.portalBinary, this.platform === 'win32' ? constants.F_OK : constants.X_OK);
@@ -370,8 +375,8 @@ if ([string]$t.State -eq 'Running' -and (Test-Path -LiteralPath $pidFile)) {
     let registrationChanged = false;
     let wasEnabled = false;
     let oldPlist: string | undefined;
-    const service: Service = { label: this.label, root, existing: false, name: settings.portalName, beingEndpoint: connection.endpoint, fingerprint: signature,
-      environment: { HEART_PORTAL_CLIENT_FILE: path.join(this.directory, '.portal-client.json') },
+    const service: Service = { label: this.label, root, existing: false, name: settings.portalName, beingEndpoint: connection.endpoint, fingerprint: signature, runtimeId,
+      environment: { HEART_PORTAL_CLIENT_FILE: path.join(this.directory, '.portal-client.json'), ...(runtime ? { HEART_PORTAL_RUNTIME_DIR: runtime } : {}) },
       file: this.platform === 'darwin' ? path.join(this.home, 'Library/LaunchAgents', this.label + '.plist') : '' };
     try {
       const binary = path.join(root, this.platform === 'win32' ? 'heart-portal.exe' : 'heart-portal');
@@ -382,12 +387,12 @@ if ([string]$t.State -eq 'Running' -and (Test-Path -LiteralPath $pidFile)) {
       if (!settings.portalConfigPath) await atomic(config, portalConfig(settings));
       if (this.platform === 'darwin') {
         await atomic(path.join(root, 'connection.url'), connection.link);
-        await atomic(path.join(root, 'run.sh'), unixRunner(root, config, settings, { HEART_PORTAL_CLIENT_FILE: path.join(this.directory, '.portal-client.json') }));
+        await atomic(path.join(root, 'run.sh'), unixRunner(root, config, settings, service.environment));
         oldPlist = await readFile(service.file, 'utf8').catch(() => undefined);
       } else {
         const encrypted = await this.powershell(`[Console]::In.ReadToEnd() | ConvertTo-SecureString -AsPlainText -Force | ConvertFrom-SecureString`, connection.link);
         await atomic(path.join(root, 'connection.dpapi'), encrypted.trim());
-        await atomic(path.join(root, 'run.ps1'), '\ufeff' + windowsRunner(root, config, settings, { HEART_PORTAL_CLIENT_FILE: path.join(this.directory, '.portal-client.json') }));
+        await atomic(path.join(root, 'run.ps1'), '\ufeff' + windowsRunner(root, config, settings, service.environment));
       }
       if (previous) { wasEnabled = (await this.refresh()).enabled; await this.unload(previous); }
       registrationChanged = true;
@@ -398,7 +403,10 @@ if ([string]$t.State -eq 'Running' -and (Test-Path -LiteralPath $pidFile)) {
       await this.refresh();
       // Persist ownership only after registration succeeds. Stable runtime survives app moves/updates.
       await atomic(path.join(this.directory, 'portal-service.json'), JSON.stringify(service));
-      // Keep the previous runtime: it may still own the original configuration.
+      if (previous && previous.root !== service.root) await rm(path.join(previous.root, 'portal-runtime'), { recursive: true, force: true });
+      if (previous?.runtimeId && previous.runtimeId !== service.runtimeId) {
+        await rm(path.join(this.directory, 'portal-runtimes', previous.runtimeId), { recursive: true, force: true });
+      }
       return this.state;
     } catch (error) {
       if (registrationChanged) {
@@ -512,8 +520,10 @@ else { [string]$t.State }`);
         if (attempt >= 120) throw new Error('旧 Portal 进程尚未退出，已中止安装。');
         await new Promise(resolve => setTimeout(resolve, 250));
       }
-    } else await this.powershell(`$task=Find-PortalTask ${ps(service.label)};
-if ($task) { Disable-ScheduledTask -TaskName ${ps(service.label)} | Out-Null; Stop-ScheduledTask -TaskName ${ps(service.label)}; }
+    } else await this.powershell(`${windowsSandboxCancellation}
+$deadline=[DateTime]::UtcNow.AddSeconds(15);
+$task=Find-PortalTask ${ps(service.label)};
+if ($task) { Disable-ScheduledTask -TaskName ${ps(service.label)} | Out-Null; }
 # A PID file is only a hint: Windows may already have reused that PID.
 # Discover this installation's runners even if the hint is missing or stale.
 $runner=${ps(path.join(service.root, 'run.ps1'))};
@@ -525,13 +535,17 @@ function Test-PortalRunner($item) {
 function Test-SamePortalProcess($item, $expected) {
   return $item -and $item.CreationDate -eq $expected.CreationDate -and $item.ExecutablePath -eq $expected.ExecutablePath -and $item.CommandLine -eq $expected.CommandLine
 }
+$engine=${ps(path.join(service.root, 'heart-portal.exe'))};
+$children=@(Get-CimInstance Win32_Process -Filter "Name='heart-portal.exe'" | Where-Object { $_.ExecutablePath -eq $engine });
 $supervisors=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { Test-PortalRunner $_ });
+Stop-PortalSandboxTasks @($supervisors + $children) $deadline;
+# Stop-ScheduledTask may terminate the tree too, so it must follow ACL cleanup.
+if ($task) { Stop-ScheduledTask -TaskName ${ps(service.label)}; }
 foreach ($supervisor in $supervisors) {
   $supervisorId=$supervisor.ProcessId;
   $current=Get-CimInstance Win32_Process -Filter "ProcessId=$supervisorId";
   if (-not (Test-SamePortalProcess $current $supervisor)) { continue }
   & taskkill.exe /PID $supervisorId /T /F | Out-Null;
-  $deadline=[DateTime]::UtcNow.AddSeconds(15);
   do {
     $remaining=Get-CimInstance Win32_Process -Filter "ProcessId=$supervisorId";
     if (-not (Test-SamePortalProcess $remaining $supervisor)) { break }
@@ -542,17 +556,18 @@ foreach ($supervisor in $supervisors) {
 if (@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { Test-PortalRunner $_ }).Count) { throw 'Portal supervisor is still running' }
 # The runner may have started the engine before its PID file was written.
 # Select only this installation's executable, never a global process name kill.
-$engine=${ps(path.join(service.root, 'heart-portal.exe'))};
 $children=@(Get-CimInstance Win32_Process -Filter "Name='heart-portal.exe'" | Where-Object { $_.ExecutablePath -eq $engine });
 foreach ($child in $children) {
   $portalId=$child.ProcessId;
+  $current=Get-CimInstance Win32_Process -Filter "ProcessId=$portalId";
+  if (-not (Test-SamePortalProcess $current $child)) { continue }
   & taskkill.exe /PID $portalId /T /F | Out-Null;
   if ($LASTEXITCODE -ne 0 -and (Get-Process -Id $portalId -ErrorAction SilentlyContinue)) { throw 'Portal process tree did not stop' }
-  Wait-Process -Id $portalId -Timeout 15 -ErrorAction SilentlyContinue;
+  $remaining=[Math]::Max(1,[int][Math]::Ceiling(($deadline-[DateTime]::UtcNow).TotalSeconds));
+  Wait-Process -Id $portalId -Timeout $remaining -ErrorAction SilentlyContinue;
   if (Get-Process -Id $portalId -ErrorAction SilentlyContinue) { throw 'Portal is still running' }
 }
 if (@(Get-CimInstance Win32_Process -Filter "Name='heart-portal.exe'" | Where-Object { $_.ExecutablePath -eq $engine }).Count) { throw 'Old Portal is still running' }
-$deadline=[DateTime]::UtcNow.AddSeconds(15);
 while (($task=Find-PortalTask ${ps(service.label)}) -and $task.State -eq 'Running') {
   if ([DateTime]::UtcNow -ge $deadline) { throw 'Portal supervisor task is still running' }
   Start-Sleep -Milliseconds 200;

@@ -23,3 +23,5 @@ audio-agent-gateway/config/.env.local
 audio-agent-gateway/scripts/dist/
 
 audio-agent-gateway/.idea/
+
+resources/portal-runtime/

@@ -15,7 +15,7 @@ beforeEach(() => {
 });
 afterEach(() => {vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();});
 
-async function fixture(apiPrefix = "") {
+async function fixture(apiPrefix = "", options: any = {}) {
   let active: any = null;
   let readActive: (() => Promise<Response>) | undefined;
   const history: any[] = [], posts: any[] = [];
@@ -40,7 +40,7 @@ async function fixture(apiPrefix = "") {
     return Response.json({sbs_enabled:true});
   });
   vi.stubGlobal('fetch', fetcher);
-  const state = new ChatState(), runtime = createChatRuntime(state, apiPrefix ? {connection:{api:"https://fixture.test" + apiPrefix,token:""}} : {});
+  const state = new ChatState(), runtime = createChatRuntime(state, apiPrefix ? {connection:{api:"https://fixture.test" + apiPrefix,token:""}, ...options} : options);
   await runtime.start();
   return {state,runtime,history,posts,fetcher,
     setActive: (value:any) => {active=value;},
@@ -141,6 +141,22 @@ it.each(['POST', 'reader before meta'])('shows a retryable error when a new %s f
   } finally {f.runtime.dispose();}
 });
 
+it('clears a terminal scene error when the next turn starts', async () => {
+  const activity = vi.fn();
+  const f = await fixture('', { onSceneActivity: activity });
+  try {
+    f.setPost(() => Response.json({ error: 'temporary failure' }, { status: 400 }));
+    await f.runtime.send('failed turn');
+    await vi.advanceTimersByTimeAsync(20);
+    expect(activity.mock.lastCall?.[0].room).toBe('error');
+
+    f.setPost(() => Response.json({ queued: true }, { status: 202 }));
+    await f.runtime.send('new turn');
+    await vi.advanceTimersByTimeAsync(20);
+    expect(activity.mock.lastCall?.[0].room).toBe('queued');
+  } finally { f.runtime.dispose(); }
+});
+
 it.each([false, true])('tracks a fresh 200 stream returned to a follow-up through EOF (final reply: %s)', async replied => {
   const f = await fixture();
   try {
@@ -209,7 +225,7 @@ it.each(['callback', 'beating'])('discovers SBS %s while idle, lets a room inter
     await vi.advanceTimersByTimeAsync(20);
     expect(f.posts).toHaveLength(1);
     expect(f.state.items.find(i=>i.kind==='run' && i.sceneId==='room')).toMatchObject({label:
-      `${origin === 'callback' ? 'SBS 自主回调进行中；' : 'SBS 自主处理进行中；'}消息已接收，正在切换到当前对话…`});
+      '消息已接收'});
     expect(f.state.items.some(i=>i.kind==='message' && i.queued)).toBe(false);
     f.setActive({...active,next_seq:4,events:[
       {seq:3,event:'content_block_delta',data:{scene_id:'room',delta:{text:'human reply'}}},
@@ -523,7 +539,7 @@ it.each([true, false])('shows an ordinary interrupt only on continuation and rec
     f.setPost(()=>Response.json({queued:true},{status:202}));
     await f.runtime.send('change direction', [], {mode:'interrupt'});
     await vi.advanceTimersByTimeAsync(20);
-    expect(f.state.items.find(i=>i.kind==='run')).toMatchObject({label:'消息已接收，正在调整回复方向…'});
+    expect(f.state.items.find(i=>i.kind==='run')).toMatchObject({label:'消息已接收'});
     const markers = () => f.state.items.filter(i=>i.kind==='separator' && i.text.includes('转向你'));
     expect(markers()).toHaveLength(0);
     const at = new Date().toISOString();
@@ -546,7 +562,7 @@ it('keeps unaddressed persisted handoffs out of the current room SBS view', asyn
     await f.runtime.refreshHistory();
     expect(f.state.items.find(i=>i.kind==='separator' && i.marker)).toMatchObject({handoffMarker:true});
     expect(sceneItems(f.state.items,'current',{sceneId:'room',strict:true},true).some(i=>i.kind==='separator' && i.marker)).toBe(false);
-    expect(sceneItems(f.state.items,'all',{sceneId:'room'},true).some(i=>i.kind==='separator' && i.marker)).toBe(true);
+    expect(sceneItems(f.state.items,'all',{sceneId:'room'},true).some(i=>i.kind==='separator' && i.marker)).toBe(false);
   } finally {f.runtime.dispose();}
 });
 

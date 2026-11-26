@@ -91,10 +91,20 @@
   background: var(--surface);
 }
 
+.rail-settings-menu #options-trigger svg {
+  width: 28px;
+  height: 28px;
+  fill: none;
+}
+
 @media (max-width: 800px) {
   #conversation-options.rail-settings-menu {
     left: 10px;
   }
+}
+
+#conversation-options.rail-settings-menu::details-content {
+  content-visibility: visible;
 }
 
 #conversation-options.rail-settings-menu .options-menu {
@@ -103,4 +113,8 @@
   max-height: calc(100vh - 100px);
   overflow: auto;
   transform-origin: bottom left;
+
+  &:not([inert]) {
+    z-index: 1;
+  }
 }

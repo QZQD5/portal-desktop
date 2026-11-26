@@ -177,7 +177,7 @@ type SendTarget = {
   beingId: string;
   reply?: FeedReply;
 };
-export type TownAPI = Pick<DesktopAPI, 'localApps' | 'associateApp' | 'unlinkApp' | 'town' | 'townLive' | 'onTownLive' | 'reconnectTown' | 'sendTown' | 'townAuth' | 'autoPairTown' | 'cancelTownPair' | 'pairTown' | 'saveTownToken' | 'copyText' | 'openBrowser' | 'openTownLink' | 'localKits' | 'deleteKit' | 'importKit' | 'prepareKit' | 'installKit' | 'discardKit' | 'openKits'>;
+export type TownAPI = Pick<DesktopAPI, 'localApps' | 'associateApp' | 'unlinkApp' | 'town' | 'townLive' | 'onTownLive' | 'reconnectTown' | 'sendTown' | 'townAuth' | 'autoPairTown' | 'cancelTownPair' | 'pairTown' | 'saveTownToken' | 'copyText' | 'openBrowser' | 'openTownLink' | 'localKits' | 'deleteKit' | 'importKit' | 'prepareKit' | 'installKit' | 'discardKit' | 'openKits' | 'home'>;
 export class TownModel extends Store {
   plugins?: import('../../plugins/model').PluginsModel;
   supportsLocalKits = true;
@@ -255,7 +255,9 @@ export class TownModel extends Store {
   recipient = "";
   sendError = "";
   sendNotice = "";
-  plan?: KitInstallPlan;
+  plan?: KitInstallPlan & { sourceId: string };
+  pendingDeleteKit?: LocalKit;
+  localKitsRevision = 0;
   prepareBusy = false;
   installBusy = false;
   installError = "";
@@ -586,7 +588,7 @@ export class TownModel extends Store {
     const samePage = this.view === view && this.directId === id;
     this.view = view;
     this.directId = id;
-    this.tab = view === 'kits' ? 'grove' : this.tabs[view] || definitions[view].tabs[0]?.[0] || view;
+    this.tab = view === 'kits' ? (this.localOnly ? 'local' : 'grove') : this.tabs[view] || definitions[view].tabs[0]?.[0] || view;
     this.offset = 0;
     if (!samePage) this.search = "";
     void this.load();
@@ -596,12 +598,20 @@ export class TownModel extends Store {
     if (this.view === 'kits') {
       this.localOnly = tab === 'local';
       if (this.localOnly) this.groveKind = 'kit';
-      tab = 'grove';
+      tab = this.localOnly ? 'local' : 'grove';
     }
     this.tab = tab;
     this.tabs[this.view] = tab;
     this.offset = 0;
     this.search = "";
+    void this.load();
+  }
+  setLocalOnly(localOnly: boolean) {
+    this.localOnly = localOnly;
+    this.offset = 0;
+    this.toolSelection = '';
+    this.localKit = undefined;
+    this.tab = localOnly ? 'local' : 'grove';
     void this.load();
   }
   pagination() { return this.view === 'kits' ? toolPage(this) : catalogPage(this); }
@@ -1527,6 +1537,7 @@ export class TownModel extends Store {
     try {
       const library = await this.api.localKits();
       if (generation === this.installedRequest) this.installedLibrary = library;
+      return library;
     } catch (error) {
       if (generation === this.installedRequest) this.installedError = errorText(error);
     } finally {
@@ -1538,7 +1549,7 @@ export class TownModel extends Store {
   }
   async showInstalledKit(name: string) {
     this.directId = undefined;
-    this.tab = "grove";
+    this.tab = "local";
     this.localOnly = true;
     this.groveKind = 'kit';
     this.search = "";
@@ -1553,18 +1564,18 @@ export class TownModel extends Store {
       this.selectLocal(kit);
     }
   }
-  async prepareKit(id: string) {
+  async prepareKit(id: string, releaseId?: string) {
     if (this.prepareBusy || this.plan) return;
     this.prepareBusy = true;
     this.changed();
     try {
       const revision = this.lifecycleRevision;
-      const plan = await this.api.prepareKit(id);
+      const plan = await this.api.prepareKit(id, releaseId);
       if (revision !== this.lifecycleRevision) {
         await this.api.discardKit(plan.ticket);
         return;
       }
-      this.plan = plan;
+      this.plan = { ...plan, sourceId: id };
       this.environment = {};
       this.installError = "";
       this.installRetried = false;
@@ -1585,18 +1596,22 @@ export class TownModel extends Store {
   }
   async install() {
     if (!this.plan || this.installBusy) return;
+    const plan = this.plan;
     const revision = this.lifecycleRevision;
     this.installBusy = true;
     this.installError = "";
     this.changed();
     try {
       const result = await this.api.installKit({
-        ticket: this.plan.ticket,
+        ticket: plan.ticket,
         environment: { ...this.environment },
       });
       if (revision !== this.lifecycleRevision) return;
+      // History is best-effort and only records a completed installation.
+      void this.api.home?.connectors?.reportLocalKitHistory?.({ source_id: plan.sourceId, version: plan.version })?.catch(() => {});
       this.plan = undefined;
       this.environment = {};
+      this.localKitsRevision++;
       this.toast(`${result.name}：${result.message}`);
       if (this.view === "kits") {
         if (this.tab === "local" && !this.directId) await this.showInstalledKit(result.name);
@@ -1619,14 +1634,31 @@ export class TownModel extends Store {
       }
     });
   }
-  async deleteKit(kit: LocalKit) {
+  requestDeleteKit(kit: LocalKit) {
+    if (this.installBusy || this.prepareBusy) return;
+    this.pendingDeleteKit = kit;
+    this.changed();
+  }
+  cancelDeleteKit() {
+    if (!this.pendingDeleteKit) return;
+    this.pendingDeleteKit = undefined;
+    this.changed();
+  }
+  async confirmDeleteKit() {
+    const kit = this.pendingDeleteKit;
+    if (!kit) return;
+    this.pendingDeleteKit = undefined;
+    this.changed();
     await this.run(async () => {
       const result = await this.api.deleteKit(kit.name);
       if (!result.deleted) return;
       if (this.localKit?.name === kit.name) this.localKit = undefined;
       if (this.selectedId === kit.name) this.selectedId = "";
       this.toast(`${kit.name} 已删除。`);
-      await this.load();
+      const library = await this.refreshInstalledKits();
+      if (library && this.tab === 'local') this.library = library;
+      this.localKitsRevision++;
+      this.changed();
     });
   }
   async run(operation: () => Promise<unknown>) {

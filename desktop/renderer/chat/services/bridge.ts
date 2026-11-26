@@ -6,6 +6,7 @@ import { HistoryCache } from './history-cache';
 import { localActivityHistory } from './activity-history';
 import { applyPluginAppearance } from '../../shared/plugin-appearance';
 import { isVoiceState } from '../../../shared/voice';
+import { CLIPBOARD_TEXT_MAX_LENGTH } from '../../../shared/clipboard';
 
 /** Source-checked desktop transport. It never reads or mutates rendered UI. */
 export function createChatBridge(state: ChatState) {
@@ -49,6 +50,7 @@ export function createChatBridge(state: ChatState) {
   };
   const unsubscribeActivity = state.subscribe(publishActivity);
   async function copyText(text: string): Promise<void> {
+    if (text.length > CLIPBOARD_TEXT_MAX_LENGTH) throw new Error('复制内容过长。');
     if (!embedded || location.protocol !== 'beings:') return navigator.clipboard.writeText(text);
     if (disposed) throw new Error('Chat closed');
     const id = crypto.randomUUID();
@@ -167,13 +169,15 @@ export function createChatBridge(state: ChatState) {
           return;
         case 'beings:scene-tasks':
           if (data.revision !== revision || data.endpoint !== new URLSearchParams(location.search).get('history_scope') || !Array.isArray(data.tasks) || data.tasks.length > 200) return;
-          if (!data.tasks.every((t: any) => t && typeof t.id === 'string' && typeof t.sceneId === 'string' && Number.isFinite(t.createdAt) && ['queued','running','done','failed','cancelled','interrupted','budget_exhausted','timeout'].includes(t.status))) return;
+          if (!data.tasks.every((t: any) => t && typeof t.id === 'string' && typeof t.sceneId === 'string' && Number.isFinite(t.createdAt) &&
+            (!('brief' in t) || typeof t.brief === 'string') && (!('turns' in t) || Number.isSafeInteger(t.turns)) &&
+            ['queued','running','done','failed','cancelled','interrupted','budget_exhausted','timeout'].includes(t.status))) return;
           if (typeof data.subagentConfigured === 'boolean') state.subagentConfigured = data.subagentConfigured;
           if (typeof data.subagentEnabled === 'boolean') state.subagentEnabled = data.subagentEnabled;
           runtime.updateSceneTasks(data.tasks, data.subagentReady === true);
           return;
         case 'beings:permission-state':
-          if (data.revision !== revision || !['read-only', 'supervised', 'auto-review', 'full-access'].includes(data.mode)) return;
+          if (data.revision !== revision || !['supervised', 'full-access'].includes(data.mode)) return;
           state.permissionMode = data.mode;
           state.permissionMenuOpen = data.open === true;
           state.changed();
@@ -248,6 +252,7 @@ export function createChatBridge(state: ChatState) {
           return;
         }
         case "beings:appearance":
+          if (data.toastHost === true) { state.toastHosted = true; state.changed(); }
           if (data.theme === "light" || data.theme === "dark")
             ui.theme(data.theme);
           return;

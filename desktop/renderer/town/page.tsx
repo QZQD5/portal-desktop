@@ -1,3 +1,5 @@
+import { AnimatePresence } from 'motion/react';
+import { DropdownMenuMotion } from '../shared/components/animate-ui/dropdown-menu-motion';
 import { Icon } from '../shared/icons/icon';
 import { CodeClipboard } from '../shared/components/markdown';
 import { ToolsLibrary } from './components/tools-library';
@@ -111,11 +113,11 @@ export function Town({ model, visible = model.visible }: { model: TownModel; vis
               </option>
             ))}
           </select>
-          {town.view === "kits" && town.tab === "grove" && <div className="segmented grove-kind-filter" role="tablist" aria-label="Grove 类型" onKeyDown={navigateTabs}>
+          {town.view === "kits" && (town.tab === "grove" || town.tab === "local") && <div className="segmented grove-kind-filter" role="tablist" aria-label="Grove 类型" onKeyDown={navigateTabs}>
             {([["", "全部"], ["app", "App"], ["kit", "Kit"], ["plugin", "Plugin"]] as const).map(([value, label]) => <button key={value} role="tab" id={`grove-kind-${value || 'all'}`} aria-controls="town-body" tabIndex={town.groveKind === value ? 0 : -1} aria-selected={town.groveKind === value} className={town.groveKind === value ? "selected" : ""} onClick={() => { town.groveKind = value; town.offset = 0; town.toolSelection = ""; town.selectedId = ""; town.localKit = undefined; town.changed(); }}>{label}</button>)}
           </div>}
           {town.view === 'kits' && !town.directId && !pluginLibrary && <>
-            <label className="tools-local-filter"><input type="checkbox" checked={town.localOnly} onChange={e => { town.localOnly = e.target.checked; town.offset = 0; town.toolSelection = ""; town.localKit = undefined; town.changed(); }} />仅本机存在</label>
+            <label className="tools-local-filter"><input type="checkbox" checked={town.localOnly} onChange={e => town.setLocalOnly(e.target.checked)} />仅本机存在</label>
             {town.groveKind === 'kit' && town.supportsLocalKits && <button className="primary" onClick={() => void town.importKit()}>导入 Kit</button>}
           </>}
           <select
@@ -130,9 +132,9 @@ export function Town({ model, visible = model.visible }: { model: TownModel; vis
             }}
           >
             <option value="">全部阶段（含停维护）</option>
-            <option value="grown">🌳 已长成</option>
-            <option value="growing">🌿 成长中</option>
-            <option value="sprouting">🌱 发芽中</option>
+            <option value="grown">已长成</option>
+            <option value="growing">成长中</option>
+            <option value="sprouting">发芽中</option>
           </select>
           {town.view === "announcements" && !town.directId && <select aria-label="公告分类" value={town.announcementCategory}
             onChange={event => { town.announcementCategory = event.target.value; town.offset = 0; void town.load(); }}>
@@ -244,7 +246,7 @@ function TownBody({ town }: { town: TownModel }) {
   if (town.error)
     return (
       <div className="empty-state">
-        <div className="empty-symbol">{town.error.auth ? "⌑" : "↻"}</div>
+        <div className="empty-symbol"><Icon name={town.error.auth ? "settings-town" : "refresh"} /></div>
         <h2>{town.error.auth ? "连接 Town，继续阅读" : "暂时未能读取内容"}</h2>
         <p>{town.error.message}</p>
         <button
@@ -498,8 +500,8 @@ function FiresideMembers({
         {loading && <span className="fireside-members-loading" aria-label="正在读取" />}
         <Icon name="chevron-down-12" className="fireside-members-chevron" />
       </button>
-      {open && (
-        <div
+      <AnimatePresence>{open && (
+        <DropdownMenuMotion
           className="fireside-member-panel"
           role="dialog"
           aria-label="围炉成员名单"
@@ -550,8 +552,8 @@ function FiresideMembers({
               </div>
             ))}
           </div>
-        </div>
-      )}
+        </DropdownMenuMotion>
+      )}</AnimatePresence>
     </div>
   );
 }

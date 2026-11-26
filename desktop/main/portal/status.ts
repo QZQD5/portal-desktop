@@ -1,8 +1,36 @@
-import { open } from 'node:fs/promises';
-import type { PortalState } from '../../shared/types';
+import { open, readFile, realpath } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import os from 'node:os';
+import { parse } from 'smol-toml';
+import type { PortalState, SubagentConfig, SubagentStatus, SceneTaskSnapshot } from '../../shared/types';
 import path from 'node:path';
 
 export interface SubagentState { enabled: boolean; configured: boolean; ready: boolean; state_dir: string }
+
+export function subagentHealth(config: SubagentConfig, snapshot: SceneTaskSnapshot, phase: PortalState['phase']): SubagentStatus {
+  const lastTask = snapshot.tasks.filter(task => task.status !== 'running' && task.status !== 'queued' &&
+    (!config.validated_at || (task.endedAt || task.createdAt) >= config.validated_at))
+    .sort((a, b) => (b.endedAt || b.createdAt) - (a.endedAt || a.createdAt))[0];
+  const configured = Boolean(config.provider && config.model);
+  const ready = snapshot.subagentReady === true;
+  let health: SubagentStatus['health'] = 'ok';
+  let message = '执行环境已就绪；接口可用性以实际任务结果为准。';
+  if (!configured) { health = 'error'; message = '尚未取得可用模型配置，请保存 Being 连接或自定义配置。'; }
+  else if (!config.api_key_configured) {
+    health = 'warning';
+    message = '模型凭据未就绪。默认模型请重新保存 Being 连接；自定义模型请填写对应接口的 API 密钥。';
+  } else if (!ready) {
+    health = phase === 'error' ? 'error' : 'warning';
+    message = phase === 'connected' ? 'subagent 执行环境尚未就绪，请检查 Portal 诊断。' : 'Portal 尚未连接，subagent 暂不能执行任务。';
+  }
+  if (lastTask && ['failed', 'timeout', 'interrupted', 'budget_exhausted'].includes(lastTask.status)) {
+    health = 'error';
+    message = '最近一次 subagent 任务未完成。下方保留该次结果；修改配置后需通过新任务验证。';
+  }
+  return { enabled: config.enabled !== false, inheritModel: config.inherit_model, configured, ready,
+    provider: config.provider, model: config.model, thinking: config.thinking, baseUrl: config.base_url, api: config.api,
+    apiKeyConfigured: config.api_key_configured, health, message, ...(lastTask ? { lastTask } : {}) };
+}
 
 export interface PortalSample {
   schema: 1; pid: number; nonce: string; boot_id: string; sequence: number;
@@ -27,7 +55,7 @@ export async function readPortalReady(file: string, pid: number, nonce: string):
 }
 
 /** Only accept capabilities published by the selected live engine. */
-export async function readSubagentState(directory: string, pid?: number): Promise<SubagentState | null> {
+export async function readSubagentState(directory: string, pid: number | undefined, configPath: string, endpoint: string): Promise<SubagentState | null> {
   if (!pid) return null;
   try {
     const [ready, status] = await Promise.all([
@@ -37,7 +65,25 @@ export async function readSubagentState(directory: string, pid?: number): Promis
     if (ready?.pid !== pid || status?.pid !== pid || typeof ready.nonce !== 'string' || !ready.nonce || status.nonce !== ready.nonce ||
       typeof status.enabled !== 'boolean' || typeof status.configured !== 'boolean' || typeof status.ready !== 'boolean' ||
       typeof status.state_dir !== 'string' || !path.isAbsolute(status.state_dir)) return null;
-    return { enabled: status.enabled, configured: status.configured, ready: status.ready, state_dir: status.state_dir };
+    // The status file reports readiness, not permission to select another directory.
+    // Match Portal's config-relative override or default per-Being identity hash.
+    const document = parse(await readFile(configPath, 'utf8'));
+    const subagent = document.subagent as { state_dir?: unknown } | undefined;
+    const configured = subagent?.state_dir;
+    if (configured !== undefined && typeof configured !== 'string') return null;
+    const url = new URL(endpoint);
+    const identity = `${url.host.toLowerCase()}/${url.pathname.replaceAll('/', '')}`;
+    const portalHome = process.env.HOME || process.env.USERPROFILE || os.homedir();
+    const expected = typeof configured === 'string' && configured.trim()
+      ? path.resolve(path.dirname(configPath), configured === '~' ? portalHome : configured.startsWith('~/') ? path.join(portalHome, configured.slice(2)) : configured)
+      : path.join(portalHome, '.heart-portal/subagent', createHash('sha256').update(identity).digest('hex').slice(0, 16));
+    if (path.resolve(status.state_dir) !== path.resolve(expected)) return null;
+    // Resolve once before handing the selected directory to the ledger/activity readers.
+    const state_dir = await realpath(expected).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return expected;
+      throw error;
+    });
+    return { enabled: status.enabled, configured: status.configured, ready: status.ready, state_dir };
   } catch { return null; }
 }
 // Telemetry from the selected runtime only; never grants ownership or permissions.
@@ -46,7 +92,7 @@ export async function readPortalSample(file: string, pid: number, nonce: string)
     const s = await readStatus(file);
     const now = Date.now();
     if (!s || s.pid !== pid || !nonce || s.nonce !== nonce ||
-        !['starting', 'connecting', 'connected', 'retrying', 'auth_required', 'invalid', 'local'].includes(s.state)) return null;
+        !['starting', 'connecting', 'connected', 'retrying', 'handshake_rejected', 'auth_required', 'invalid', 'local'].includes(s.state)) return null;
     // Upstream publishes state changes with PID + per-launch nonce, without a
     // heartbeat timestamp. Callers first verify the selected process is alive;
     // never apply the legacy heartbeat expiry to this native protocol.
@@ -65,6 +111,7 @@ export function portalSampleState(sample: PortalSample | null, ready = false): P
   switch (sample.state) {
     case 'connected': return { phase: 'connected', message: 'Portal 已连接云端 Being，等待工具调用' };
     case 'retrying': return { phase: 'reconnecting', message: 'Relay 连接断开，Portal 正在自动重连' };
+    case 'handshake_rejected': return { phase: 'error', message: 'Relay 拒绝了 Portal 握手，仍在自动重试。请检查 Being 连接链接或查看日志中的拒绝原因。' };
     case 'auth_required': return { phase: 'error', message: '连接凭据已失效或被拒绝，请更新 Being 连接链接。' };
     case 'invalid': return { phase: 'error', message: 'Portal 连接配置无效，请检查连接链接。' };
     default: return { phase: 'starting', message: sample.state === 'local' ? 'Portal 本地服务已就绪' : 'Portal 正在连接…' };

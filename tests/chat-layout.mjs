@@ -16,26 +16,110 @@ const bodies = [
   '![布局检查](data:image/svg+xml;base64,'+Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="160"><rect width="1600" height="160" fill="#cce5ff"/></svg>').toString('base64')+')',
 ];
 const history = bodies.flatMap((content,i)=>['being','user'].map((role,j)=>({seq:i*2+j+1,role,content,scene_id:'layout',at:'2026-10-10T08:00:00Z'})));
+const generation = {type:'being.image-generation',version:1,being_id:'fixture',jobs:[{
+  index:1,title:'多张生成结果',submission:'accepted',generation_id:'gen_gallery',client_request_id:'gallery',error_code:null,
+}]};
+const generationHistory = [
+  generation,
+  {...generation,jobs:[{...generation.jobs[0],title:'结果待核对',generation_id:'gen_uncertain',client_request_id:'uncertain'}]},
+  {...generation,jobs:[{...generation.jobs[0],title:'提交拒绝',submission:'rejected',generation_id:null,client_request_id:'rejected',error_code:'FIXTURE_LIMIT'}]},
+].map((receipt,index) => ({seq:index+1,role:'being',content:JSON.stringify(receipt),scene_id:'layout',at:new Date().toISOString()}));
+let generatedOnly = false;
 const server=createServer((req,res)=>{
   const url=new URL(req.url,'http://localhost');
   if(url.pathname==='/wide.svg'){res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="160"><rect width="1600" height="160" fill="#cce5ff"/></svg>');return;}
   if(assets.has(url.pathname)){res.setHeader('Content-Type',url.pathname.endsWith('.js')?'text/javascript':url.pathname.endsWith('.css')?'text/css':'text/html; charset=utf-8');res.end(assets.get(url.pathname));return;}
+  if(url.pathname==='/api/image-generations/gen_gallery'){
+    res.setHeader('Content-Type','application/json');
+    return res.end(JSON.stringify({id:'gen_gallery',client_request_id:'gallery',status:'succeeded',stage:'complete',availability:'available',
+      outputs:Array.from({length:4},(_,index)=>({id:'result-'+index,view_url:origin+'/wide.svg?generated='+index,mime:'image/png'})),
+    }));
+  }
+  if(url.pathname==='/api/image-generations/gen_uncertain'){
+    res.setHeader('Content-Type','application/json');
+    return res.end(JSON.stringify({id:'gen_uncertain',client_request_id:'uncertain',status:'uncertain',availability:'pending',outputs:[]}));
+  }
   if(url.pathname==='/api/stream/active'){res.writeHead(204);res.end();return;}
-  if(url.pathname.startsWith('/api/')){res.setHeader('Content-Type','application/json');res.end(JSON.stringify(url.pathname==='/api/history'?{messages:history}:{being_name:'Willow',sbs_enabled:false}));return;}
+  if(url.pathname.startsWith('/api/')){res.setHeader('Content-Type','application/json');res.end(JSON.stringify(url.pathname==='/api/history'?{messages:generatedOnly ? generationHistory : history}:{being_name:'Willow',sbs_enabled:false}));return;}
   res.setHeader('Content-Type','text/html; charset=utf-8');res.end('<!doctype html><style>body{margin:0}iframe{display:block;border:0;width:100vw;height:100vh}</style><iframe src="/loom.html?scene_id=layout&scene_label=布局检查"></iframe>');
 });
 await new Promise(r=>server.listen(Number(process.env.CHAT_LAYOUT_PORT)||0,'127.0.0.1',r));
 const origin='http://127.0.0.1:'+server.address().port;
 history.slice(-2).forEach(row=>row.content='![布局检查]('+origin+'/wide.svg)');
+const pictures = ['第一张示例图', '第二张示例图', '第三张示例图'];
+history.push({seq: history.length + 1, role: 'being', scene_id: 'layout', at: '2026-10-10T08:01:00Z',
+  content: pictures.map((name, index) => `![${name}](${origin}/wide.svg?image=${index})`).join('\n\n')});
 if(process.env.CHAT_LAYOUT_PREVIEW){console.log(origin);await new Promise(()=>{});}
 let browser;
 try{
   browser=await chromium.launch({channel:'chrome',headless:true});
-  const page=await browser.newPage({reducedMotion:'reduce'});
+  const page=await browser.newPage({reducedMotion:'reduce',viewport:{width:1440,height:900}});
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true }));
   await page.goto(origin);
   const frame=page.frameLocator('iframe');
   await frame.locator('.message').nth(history.length - 1).waitFor();
   await mkdir('test-results',{recursive:true});
+  const composerBefore=await frame.locator('#input-area').boundingBox();
+  assert.equal(composerBefore.width, 760, 'Desktop Prompt has the Figma maximum width');
+  const columnWidth = await frame.locator('#messages').evaluate(el => {
+    const style = getComputedStyle(el);
+    return el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  });
+  assert.ok(columnWidth > 900 && columnWidth <= 920, 'Desktop conversation aligns within the 920px column');
+  const photos = frame.getByRole('group', {name:'3 张图片',exact:true});
+  await photos.locator('.stack-card[data-top]').getByRole('button',{name:'预览 第一张示例图'}).waitFor();
+  await photos.getByLabel('图片堆叠，方向键翻看').press('ArrowRight');
+  await photos.locator('.stack-card[data-top]').getByRole('button',{name:'预览 第二张示例图'}).waitFor();
+  const deck = photos.locator('.stack');
+  await deck.hover();
+  for (let sample = 0; sample < 5; sample++) await page.mouse.wheel(24, 2);
+  await photos.locator('.stack-card[data-top]').getByRole('button',{name:'预览 第三张示例图'}).waitFor();
+  const swipeStart = await deck.evaluate(() => performance.now() + 300);
+  const swipe = (at, samples) => deck.evaluate((node, { at, samples }) => {
+    samples.forEach((deltaX, index) => {
+      const event = new WheelEvent('wheel', { deltaX, bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'timeStamp', { value: at + index * 8 });
+      node.dispatchEvent(event);
+    });
+  }, { at, samples });
+  // A swipe accelerates and then tapers off. A new swipe can start before
+  // the old stream has been quiet for 220 ms.
+  const samples = [12, 22, 30, 42, 24, 12, 8, 4, 2];
+  for (const [index, name] of ['第一张示例图', '第二张示例图', '第三张示例图'].entries()) {
+    await swipe(swipeStart + 100 * index, samples);
+    await photos.locator('.stack-card[data-top]').getByRole('button',{name:'预览 ' + name}).waitFor({timeout:2000});
+  }
+  const reverse = samples.map(delta => -delta);
+  for (const [index, name] of ['第二张示例图', '第一张示例图', '第三张示例图'].entries()) {
+    await swipe(swipeStart + 300 + 100 * index, reverse);
+    await photos.locator('.stack-card[data-top]').getByRole('button',{name:'预览 ' + name}).waitFor({timeout:2000});
+  }
+  await deck.press('ArrowLeft');
+  await photos.locator('.stack-card[data-top]').getByRole('button',{name:'预览 第二张示例图'}).waitFor();
+  await deck.press('ArrowRight');
+  await photos.locator('.stack-card[data-top]').getByRole('button',{name:'预览 第三张示例图'}).waitFor();
+  const verticalScroll = await deck.evaluate(node => node.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true })));
+  assert.ok(verticalScroll, 'Mac vertical scrolling stays available over the deck');
+  await photos.locator('.stack-card[data-top] button').hover();
+  await photos.getByRole('button',{name:'展开 3 张图片'}).click();
+  assert.equal(await photos.locator('.message-image-stack img').count(),3);
+  await photos.evaluate(() => Object.defineProperty(navigator, 'platform', { value: 'Win32', configurable: true }));
+  await photos.getByRole('button',{name:'收起图片'}).click();
+  await photos.locator('.stack-card[data-top]').getByRole('button',{name:'预览 第三张示例图'}).waitFor();
+  await deck.hover();
+  await page.mouse.wheel(0, 100);
+  await photos.locator('.stack-card[data-top]').getByRole('button',{name:'预览 第一张示例图'}).waitFor();
+  await page.mouse.wheel(0, -100);
+  await photos.locator('.stack-card[data-top]').getByRole('button',{name:'预览 第三张示例图'}).waitFor();
+  await page.context().setOffline(true);
+  await frame.locator('#toast:popover-open').waitFor();
+  assert.equal(await frame.locator('#toast').textContent(),'已离线，恢复网络后会自动继续');
+  assert.equal((await frame.locator('#toast').boundingBox()).y,18);
+  assert.equal(await frame.locator('#reconnect-banner').count(),0);
+  assert.deepEqual(await frame.locator('#input-area').boundingBox(),composerBefore);
+  await page.screenshot({path:'test-results/chat-standalone-offline-toast.png'});
+  await page.context().setOffline(false);
+  await frame.locator('#toast').waitFor({state:'hidden'});
   await frame.locator('#file-input').setInputFiles([{name:'很长的附件名称'.repeat(18)+'.txt',mimeType:'text/plain',buffer:Buffer.from('layout fixture')},{name:'第二份附件.txt',mimeType:'text/plain',buffer:Buffer.from('layout fixture')}]);
   await frame.getByRole('button',{name:'移除 第二份附件.txt'}).waitFor();
   for(const width of [1100,640,380,300]){
@@ -52,26 +136,57 @@ try{
       const copy = row.getByRole('button', { name: '复制正文', exact: true });
       await bubble.hover();
       const before = await bubble.boundingBox();
+      const scrollBefore = await frame.locator('#messages').evaluate(el => el.scrollTop);
       const button = await copy.boundingBox();
-      assert.ok(role === 'user' ? button.x + button.width <= before.x : button.x >= before.x + before.width, 'Copy stays outside the bubble');
+      assert.ok(role === 'user' ? button.x + button.width <= before.x : button.x >= before.x + before.width,
+        `${role} Copy stays outside the bubble at ${width}px`);
       await copy.hover();
-      assert.deepEqual(await bubble.boundingBox(), before, 'Hover does not resize or move the bubble');
+      const after = await bubble.boundingBox();
+      const scrollAfter = await frame.locator('#messages').evaluate(el => el.scrollTop);
+      assert.deepEqual({ ...after, y: after.y + scrollAfter - scrollBefore }, before,
+        `Hover does not resize or move the ${role} bubble at ${width}px`);
       assert.equal(await copy.evaluate(el => getComputedStyle(el).opacity), '1');
     }
-    const overflow=await frame.locator('#messages, .message, .message .content, .code-block, .table-wrap, #input-area, #pending-files, .pending-file').evaluateAll(nodes=>nodes.filter(n=>n.scrollWidth>n.clientWidth+1).map(n=>({element:n.id||n.className,width:n.clientWidth,contentWidth:n.scrollWidth})));
+    const overflow = await frame.locator('#messages, .message, .message .content, .code-block, .table-wrap, #input-area, #pending-files')
+      .evaluateAll(nodes => nodes.filter(node => {
+        if (node.scrollWidth <= node.clientWidth + 1) return false;
+        // Wide tables can scroll inside the message's boundary.
+        return !node.matches('.table-wrap') || getComputedStyle(node).overflowX === 'visible';
+      }).map(node => ({ element: node.id || node.className, width: node.clientWidth, contentWidth: node.scrollWidth })));
     assert.deepEqual(overflow,[],`Horizontal overflow at ${width}px`);
+    const attachmentList = frame.locator('#pending-files .pending-files-list');
+    assert.ok(await attachmentList.evaluate(list => {
+      const cards = Array.from(list.querySelectorAll('.pending-file'));
+      return getComputedStyle(list).overflowX === 'auto' && list.scrollHeight === list.clientHeight &&
+        cards.length === 2 && cards.every(card => card.offsetTop === cards[0].offsetTop);
+    }), `Attachments stay in one horizontally scrollable row at ${width}px`);
+    assert.equal(await frame.getByRole('button',{name:/收起附件|另有.*份附件/}).count(),0);
     assert.equal(await frame.locator('#chat-index').count(),1);
     await frame.locator('#input').fill(long);
     assert.ok(await frame.locator('#input').evaluate(n=>n.scrollWidth<=n.clientWidth+1));
     assert.ok(await frame.locator('#messages').evaluate(n=>n.scrollHeight>n.clientHeight),'Vertical reading must remain available');
     await page.screenshot({path:`test-results/chat-layout-${width}.png`});
   }
+  const attachmentList = frame.locator('#pending-files .pending-files-list');
+  await attachmentList.hover();
+  await page.mouse.wheel(400,0);
+  await page.waitForFunction(() => document.querySelector('iframe').contentDocument.querySelector('.pending-files-list').scrollLeft > 0);
+  const secondRemove = frame.getByRole('button',{name:'移除 第二份附件.txt'});
+  await secondRemove.focus();
+  assert.ok(await secondRemove.evaluate(button => {
+    const list = button.closest('.pending-files-list').getBoundingClientRect();
+    const rect = button.getBoundingClientRect();
+    return rect.left >= list.left && rect.right <= list.right + 1;
+  }), 'The scrolled shelf keeps the last attachment remove button usable');
+  await page.mouse.wheel(-400,0);
+  await page.waitForFunction(() => document.querySelector('iframe').contentDocument.querySelector('.pending-files-list').scrollLeft === 0);
   await frame.locator('html').evaluate(n=>n.dataset.theme='dark');
   await page.screenshot({path:'test-results/chat-layout-dark.png'});
   // Wrapping must never rewrite the copyable source.
   assert.equal(await frame.locator('.message.being .code-block code').textContent(),'const result = "'+long+'";');
   const keyboardCopy = frame.locator('.message.being').first().getByRole('button', {name:'复制正文',exact:true});
   await page.mouse.move(0, 0);
+  await page.keyboard.press('Tab');
   await keyboardCopy.focus();
   assert.equal(await keyboardCopy.evaluate(el => getComputedStyle(el).opacity), '1', 'Keyboard focus reveals Copy without hovering');
   assert.equal(await keyboardCopy.evaluate(el => getComputedStyle(el).outlineStyle), 'solid');
@@ -81,7 +196,50 @@ try{
   await touchCopy.waitFor();
   assert.equal(await touchCopy.evaluate(el => getComputedStyle(el).opacity), '1', 'Touch users can discover Copy without hovering');
   assert.equal(await touchCopy.evaluate(el => getComputedStyle(el).pointerEvents), 'auto');
-  assert.equal((await touchCopy.boundingBox()).width, 32);
+  assert.equal((await touchCopy.boundingBox()).width, 44);
   await touchPage.close();
+  generatedOnly = true;
+  const generated = await browser.newPage({viewport:{width:1100,height:850},reducedMotion:'reduce'});
+  await generated.goto(origin+'/loom.html?scene_id=layout&history_scope='+encodeURIComponent('https://echo.beings.town/fixture'));
+  const results = generated.getByRole('region', { name:'多张生成结果' });
+  await results.locator('.image-generation-photo[data-loaded="true"]').nth(3).waitFor();
+  const actions = results.locator('xpath=ancestor::*[@data-message-hover]').locator('[data-message-actions]');
+  await results.getByRole('button',{name:'预览 多张生成结果'}).last().hover();
+  const collapse = results.getByRole('button',{name:'收起图片',exact:true});
+  await collapse.click({timeout:3000});
+  const photoGroup = results.getByRole('group',{name:'4 张图片',exact:true});
+  await photoGroup.locator('.stack-card[data-top] button').waitFor();
+  await photoGroup.getByLabel('图片堆叠，方向键翻看').press('ArrowRight');
+  const second = photoGroup.locator('.stack-card[data-top] img');
+  assert.match(await second.getAttribute('src'),/generated=1$/);
+  await photoGroup.getByRole('button',{name:'展开 4 张图片',exact:true}).click();
+  const expandedPhotos = photoGroup.locator('.message-image-stack img');
+  assert.equal(await expandedPhotos.count(),4);
+  await generated.waitForFunction(() => Array.from(document.querySelectorAll('.generated-image-group .message-image-stack img'))
+    .every(img => img.naturalWidth && Math.abs(img.clientHeight - img.clientWidth * img.naturalHeight / img.naturalWidth) < 1));
+  await collapse.click();
+  assert.match(await second.getAttribute('src'),/generated=1$/);
+  await actions.getByRole('button',{name:'更多消息操作',exact:true}).press('Enter');
+  const downloads = generated.getByRole('menuitem',{name:/^下载原图 多张生成结果/});
+  assert.deepEqual(await downloads.allTextContents(),[1,2,3,4].map(index => `下载原图 多张生成结果 ${index}`));
+  await generated.keyboard.press('Escape');
+  await generated.locator('html').evaluate(node => node.dataset.theme = 'dark');
+  for (const [title, status] of [['结果待核对','结果待核对'], ['提交拒绝','提交未受理']]) {
+    const card = generated.getByRole('region',{name:title,exact:true});
+    await card.scrollIntoViewIfNeeded();
+    const row = card.locator('xpath=ancestor::*[@data-message-hover]');
+    await row.getByRole('alert').getByText(status,{exact:false}).waitFor({state:'attached'});
+    const placeholder = card.locator('.image-generation-status-frame > svg');
+    await placeholder.waitFor({timeout:3000});
+    assert.ok(await placeholder.evaluate(icon => {
+      const image = icon.getBoundingClientRect(), frame = icon.parentElement.getBoundingClientRect();
+      return Math.abs(image.left + image.width / 2 - frame.left - frame.width / 2) < 1 &&
+        Math.abs(image.top + image.height / 2 - frame.top - frame.height / 2) < 1;
+    }), 'The unavailable-image icon is centered in the placeholder');
+    const feedback = row.locator('[data-message-actions]');
+    await feedback.getByRole('button',{name:'错误原因'}).waitFor();
+    assert.equal(await feedback.getByRole('button',{name:'重新查询状态'}).count(),title==='结果待核对' ? 1 : 0);
+  }
+  await generated.close();
   console.log('PASS: chat Markdown, attachments and composer fit 1100/640/380/300px, with intact code and vertical reading.');
 }finally{await browser?.close();await new Promise(r=>server.close(r));}

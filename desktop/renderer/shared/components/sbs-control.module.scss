@@ -1,4 +1,5 @@
 @use '../styles/mixins';
+@use '../styles/conversation-control';
 
 .root {
   display: flex;
@@ -28,26 +29,21 @@
   font: inherit;
 }
 
-.identity {
+.trigger.identity {
+  @include conversation-control.surface;
+
+  --ui-floating-control-shadow: 0 2px 8px rgb(0 0 0 / 8%);
+  --neutral-raised: var(--neutral-main);
+
   flex-direction: column;
   gap: 3px;
   min-width: 0;
   max-width: min(240px, 100%);
   min-height: 62px;
   padding: 10px 20px;
-  border-radius: 24px;
-  background: var(--control);
-  box-shadow: var(--popover-shadow);
-  transition: background-color 160ms ease;
-
   &[data-idle='true'] {
     min-height: 42px;
   }
-}
-
-.trigger.identity:hover,
-.identity[aria-expanded='true'] {
-  background: var(--surface);
 }
 
 .identityName {
@@ -97,7 +93,7 @@
   background: var(--hover, rgb(128 128 128 / 10%));
 }
 
-.trigger:focus-visible,
+.trigger:not(.identity):focus-visible,
 .panel button:focus-visible,
 .panel input:focus-visible {
   @include mixins.focus-ring;
@@ -336,7 +332,7 @@
   }
 }
 
-.trigger,
+.trigger:not(.identity),
 .heading > button {
   transition:
     background-color 150ms ease,

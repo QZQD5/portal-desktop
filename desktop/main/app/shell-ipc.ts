@@ -1,5 +1,6 @@
-import { app, clipboard, dialog, shell, type BrowserWindow } from 'electron';
+import { app, clipboard, ClipboardItem, dialog, nativeImage, shell, type BrowserWindow } from 'electron';
 import path from 'node:path';
+import { CLIPBOARD_TEXT_MAX_LENGTH } from '../../shared/clipboard';
 import type { ClientBrowser } from '../browser/browser';
 import { ApprovalDialogs } from '../chat/approval-dialogs';
 import { AttachmentDownloads } from '../chat/downloads';
@@ -43,8 +44,22 @@ export function registerShellIpc(options: {
   handle('beings:chat-edit', (command: import('../../shared/types').ChatEditCommand) => editChat(getWindow(), command));
   handle('beings:selection-edit', (command: import('../../shared/types').ChatEditCommand) => editChat(getWindow(), command, 'shell'));
   handle('beings:clipboard-copy', (text: string) => {
-    if (typeof text !== 'string' || text.length > 200000) throw new Error('复制内容过长。');
+    if (typeof text !== 'string' || text.length > CLIPBOARD_TEXT_MAX_LENGTH) throw new Error('复制内容过长。');
     clipboard.writeText(text);
+  });
+  handle('beings:clipboard-image', (data: unknown, mime: unknown) => {
+    const inputBytes = data instanceof ArrayBuffer
+      ? new Uint8Array(data)
+      : ArrayBuffer.isView(data)
+        ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+        : null;
+    if (!inputBytes || inputBytes.byteLength === 0 || inputBytes.byteLength > 128 * 1024 * 1024 ||
+      typeof mime !== 'string' || !/^image\/(png|jpeg|gif|webp)$/.test(mime)) throw new Error('图片格式不支持复制。');
+    const image = nativeImage.createFromBuffer(Buffer.from(inputBytes));
+    if (image.isEmpty()) throw new Error('图片数据无效，无法复制。');
+    const png = image.toPNG(), pngBytes = new ArrayBuffer(png.byteLength);
+    new Uint8Array(pngBytes).set(png);
+    return clipboard.write([new ClipboardItem({ 'image/png': new Blob([pngBytes], { type: 'image/png' }) })]);
   });
   handle('beings:browser-action', (action: import('../../shared/types').BrowserAction) => getBrowser()?.action(action));
   handle('beings:browser-bounds', (bounds: import('../../shared/types').BrowserBounds) => getBrowser()?.setBounds(bounds));

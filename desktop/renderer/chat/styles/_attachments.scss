@@ -143,7 +143,7 @@
   overflow-wrap: anywhere;
 }
 
-.attachment-download button {
+.attachment-download button:not(.chat-error-indicator > button) {
   margin-left: 10px;
 }
 
@@ -184,7 +184,7 @@
   gap: 8px;
 }
 
-.attachment-download button {
+.attachment-download button:not(.chat-error-indicator > button) {
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -196,11 +196,11 @@
   margin: 0;
 }
 
-.attachment-download button:hover {
+.attachment-download button:not(.chat-error-indicator > button):hover {
   color: var(--text);
 }
 
-.attachment-download button:disabled {
+.attachment-download button:not(.chat-error-indicator > button):disabled {
   opacity: 0.6;
 }
 
@@ -301,6 +301,7 @@
 }
 
 .attachment-file-row {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   width: 100%;
@@ -311,10 +312,10 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
+  flex: 1;
   min-width: 0;
   text-align: left;
-  color: var(--text) !important;
+  color: var(--attachment-file-text, var(--text)) !important;
 }
 
 .attachment-file-icon {
@@ -350,59 +351,13 @@
   color: var(--text-dim);
 }
 
-.attachment-file-action {
-  font-size: 17px;
-  opacity: 0.55;
-}
-
-.attachment-menu {
-  position: relative;
-  flex-shrink: 0;
-}
-
-.attachment-menu summary {
-  list-style: none;
-  cursor: pointer;
-  padding: 5px;
-  font-weight: 700;
-  color: var(--text-dim);
-}
-
-.attachment-menu summary::-webkit-details-marker {
+.attachment-download .attachment-file-label .attachment-file-metadata {
   display: none;
 }
 
-.attachment-menu > div {
-  position: absolute;
-  z-index: 20;
-  right: 0;
-  top: 100%;
-  min-width: 155px;
-  padding: 6px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg);
-  box-shadow: 0 6px 24px #0002;
-}
-
-.attachment-menu > div > button,
-.attachment-menu .attachment-details > button {
-  display: block;
-  width: 100%;
-  padding: 8px 10px;
-  text-align: left;
-  white-space: nowrap;
-  border-radius: 6px;
-}
-
-.attachment-menu button:hover {
-  background: var(--hover-overlay);
-}
-
-.attachment-menu .attachment-details:has(.attachment-segment) {
-  width: 320px;
-  max-height: 380px;
-  overflow: auto;
+.attachment-file-action {
+  font-size: 17px;
+  opacity: 0.55;
 }
 
 .message.thinking-indicator.attachment-parsing-indicator {
@@ -569,5 +524,40 @@
 @media (prefers-reduced-motion: reduce) {
   .attachment-status-spinner {
     animation: none;
+  }
+}
+
+.attachment-download-progress:has(progress) {
+  display: grid;
+  flex-basis: 100%;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 8px;
+
+  > small {
+    grid-area: 1 / 1;
+    margin: 0;
+  }
+  > button {
+    grid-area: 1 / 2;
+  }
+  > progress {
+    grid-column: 1 / -1;
+  }
+}
+
+.attachment-download .attachment-download-progress > button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+
+  &:hover {
+    background: var(--chat-menu-hover, var(--hover-overlay));
+  }
+  &:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
   }
 }

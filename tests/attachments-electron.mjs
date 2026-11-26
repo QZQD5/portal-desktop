@@ -28,8 +28,8 @@ try {
       });
       await new Promise(resolve=>objectServer.listen(0,'127.0.0.1',resolve));objectServer.unref();
       const objectOrigin='http://127.0.0.1:'+objectServer.address().port;
-      let delivery='pending', created=false, done=false;
-      globalThis.fixture={sends,history,files,downloads,finish:()=>done=true};
+      let delivery='pending', created=false, done=false, failed=false;
+      globalThis.fixture={sends,history,files,downloads,prepared:()=>created,fail:()=>failed=true,finish:()=>{failed=false;done=true;}};
       session.defaultSession.on('will-download', (_event, item) => { item.setSavePath(${JSON.stringify(directory)} + '/download-' + item.getFilename()); item.once('done', (_event, state) => downloads.push(state)); });
       const view=()=>({version:1,message_id:id,channel:'portal',scene_id:'room',created_at:Math.floor(Date.now()/1000),delivery_status:delivery,
         parts:[{type:'text',text:'请分析附件'},...files.map(f=>({type:'attachment',attachment_id:f.id,name:f.filename,mime:f.mime,size:f.size,parse_status:done?'ready':'parsing',job_id:'job_'+f.id,parse_result_id:done?'result_'+f.id:null,progress:{stage:done?'complete':'assembling',completed:1,total:1}}))]});
@@ -45,7 +45,7 @@ try {
         }
         if(p.endsWith('/complete'))return Response.json({attachment_id:p.split('/')[3],status:'ready'});
         if(p.endsWith('/parse'))return Response.json({job_id:'job_'+p.split('/')[3],attachment_id:p.split('/')[3],status:'pending'});
-        if(p.startsWith('/api/media-jobs/')){const job=p.split('/').at(-1),att=job.slice(4);return Response.json({job_id:job,attachment_id:att,status:done?'succeeded':'running',result_id:done?'result_'+att:null,progress:{stage:'assembling',completed:1,total:1}});}
+        if(p.startsWith('/api/media-jobs/')){const job=p.split('/').at(-1),att=job.slice(4);return Response.json({job_id:job,attachment_id:att,status:failed?'failed':done?'succeeded':'running',error_code:failed?'FIXTURE_PARSE_FAILED':undefined,result_id:done?'result_'+att:null,progress:{stage:'assembling',completed:1,total:1}});}
         if(p.endsWith('/parsed')){const att=p.split('/')[3];return Response.json({attachment_id:att,parse_result_id:'result_'+att,complete:true,total_segments:1,segments:[{text:'合成测试解析内容',location:{page:1}}],next_cursor:null,artifacts:[]});}
         if(p.endsWith('/content')){const f=files.find(f=>f.id===p.split('/')[3]);return Response.json({filename:f.filename,mime:f.mime,size:f.size,checksum:f.sha256,download:{url:'https://fixture.oss-cn-shanghai.aliyuncs.com/'+f.id,method:'GET',headers:{}}});}
         if(p==='/api/attachment-messages'&&init.method!=='POST')return Response.json({messages:created&&delivery!=='accepted'?[view()]:[],next_cursor:null});
@@ -79,15 +79,44 @@ try {
   await page.getByRole('menuitem',{name:/上传附件/}).click();
   await (await choosing).setFiles([sampleFile,imageFile]);
   await page.locator('#input').fill('请分析附件');await page.locator('#send-btn').click();
-  await page.locator('.attachment-card').first().waitFor();
-  await page.getByText(/正在整理完整结果/).first().waitFor().catch(async e=>{console.log(await page.locator('body').innerText());throw e;});
+  const pending = page.getByRole('list',{name:/待发送消息/});
+  const pendingRow = pending.getByRole('listitem',{name:/请分析附件/});
+  const progress = pendingRow.getByRole('button',{name:/预览第 1 条待发消息/}).locator('.composer-queue-status');
+  await progress.getByText(/上传中|上传 \d+%|确认中/).waitFor();
+  assert.equal(await pendingRow.locator('.composer-queue-drag-handle').count(),0);
+  assert.deepEqual(await pendingRow.locator('.composer-queue-row-actions button').evaluateAll(buttons =>
+    buttons.map(button=>button.getAttribute('aria-label'))),['取消排队：请分析附件']);
+  assert.equal(await page.locator('.message.user').count(),0,'Pending attachments belong to the queue');
+  await pending.getByRole('button',{name:/预览第 1 条待发消息/}).click();
+  const preview = page.getByRole('dialog',{name:'待发消息预览'});
+  await preview.getByRole('list',{name:'待发附件'}).getByText('sample.txt',{exact:true}).waitFor();
+  await page.keyboard.press('Escape');
   assert.equal(await application.evaluate(()=>globalThis.fixture.sends.length),0);
+  await application.evaluate(async () => {
+    const deadline = Date.now() + 15000;
+    while (!globalThis.fixture.prepared()) {
+      if (Date.now() >= deadline) throw new Error('Attachment upload did not reach parsing');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  });
+  await progress.getByText('解析 1/1',{exact:true}).waitFor();
   await page.reload();
-  await page.locator('.attachment-card').first().waitFor();
+  await pending.getByRole('button',{name:/预览第 1 条待发消息/}).waitFor();
+  assert.equal(await page.locator('.message.user').count(),0);
   assert.equal(await application.evaluate(()=>globalThis.fixture.files.length),2,'restart reuses uploaded files');
+  await application.evaluate(()=>globalThis.fixture.fail());
+  const retry = pendingRow.getByRole('button',{name:'重试附件处理',exact:true});
+  await retry.waitFor();
+  assert.equal(await pendingRow.locator('.composer-queue-drag-handle').count(),0);
+  assert.deepEqual(await pendingRow.locator('.composer-queue-row-actions button').evaluateAll(buttons =>
+    buttons.map(button=>button.getAttribute('aria-label'))),['重试附件处理','取消排队：请分析附件']);
   await application.evaluate(()=>globalThis.fixture.finish());
+  await retry.click();
   await page.locator('.attachment-cancel').waitFor({state:'detached'});
   await page.locator('.attachment-file-main').first().waitFor();
+  await pending.waitFor({state:'hidden'});
+  const sentFile = page.getByRole('region',{name:'sample.txt',exact:true});
+  assert.equal(await sentFile.locator('.attachment-filename span').last().innerText(),'.txt');
   await application.evaluate(async () => {
     const deadline = Date.now() + 15000;
     while (!globalThis.fixture.sends.length) {
@@ -106,10 +135,20 @@ try {
   const names=await page.locator('.attachment-card-host > section').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label')));
   assert.deepEqual(names,['sample.txt','pixel.png']);
   await page.waitForFunction(()=>document.querySelector('.attachment-image-thumbnail img')?.naturalWidth > 0);
-  await page.getByLabel('sample.txt 文件操作').click();
-  await page.getByRole('button',{name:'查看解析内容',exact:true}).first().click();
-  await page.getByText('合成测试解析内容',{exact:true}).waitFor();
-  await page.getByLabel('sample.txt 文件操作').click();
+  const fileCard = page.getByRole('region', { name: 'sample.txt' });
+  const fileMenuTrigger = fileCard.getByRole('button', { name: 'sample.txt 文件操作' });
+  const fileMenu = page.getByRole('menu', { name: 'sample.txt 文件操作' });
+  await fileCard.locator('.attachment-file-main').hover();
+  await fileMenuTrigger.click();
+  await fileMenu.getByRole('menuitem', { name: '查看解析内容', exact: true }).waitFor();
+  assert.deepEqual(await fileMenu.getByRole('menuitem').allTextContents(), ['查看解析内容']);
+  await fileMenu.getByRole('menuitem',{name:'查看解析内容',exact:true}).click();
+  const parsed = page.getByRole('dialog', {name:'解析内容',exact:true});
+  await parsed.getByText('合成测试解析内容',{exact:true}).waitFor();
+  await fileMenu.waitFor({state:'hidden'});
+  await page.keyboard.press('Escape');
+  await parsed.waitFor({state:'detached'});
+  await fileMenuTrigger.and(page.locator(':focus')).waitFor();
   await page.getByRole('button',{name:'下载 sample.txt',exact:true}).click();
   await page.getByRole('progressbar',{name:'sample.txt 下载进度'}).waitFor();
   await page.getByRole('button',{name:'预览 sample.txt',exact:true}).waitFor();
@@ -118,10 +157,19 @@ try {
   const downloadedBytes = await readFile(path.join(directory,filename));
   assert.equal(downloadedBytes.length,11 * 1024 * 1024);
   assert.ok(downloadedBytes.equals(Buffer.alloc(downloadedBytes.length,'x')));
-  await page.getByLabel('sample.txt 文件操作').click();
-  await page.locator('.attachment-menu').getByRole('button',{name:'打开',exact:true}).click();
-  await page.getByRole('button',{name:'打开所在位置',exact:true}).first().click();
-  await page.getByLabel('sample.txt 文件操作').click();
+  await fileCard.locator('.attachment-file-main').hover();
+  await fileMenuTrigger.click();
+  const openFile = fileMenu.getByRole('menuitem',{name:'用系统应用打开',exact:true});
+  await openFile.click();
+  await openFile.and(page.locator(':enabled')).focus();
+  const reveal = fileMenu.getByRole('menuitem',{name:'打开所在位置',exact:true});
+  await page.keyboard.press('ArrowDown');
+  await reveal.and(page.locator(':focus')).waitFor();
+  await page.keyboard.press('Enter');
+  await page.evaluate(() => document.activeElement.blur());
+  await page.keyboard.press('Escape');
+  await fileMenu.waitFor({state:'hidden'});
+  await fileMenuTrigger.and(page.locator(':focus')).waitFor();
   await page.getByRole('button',{name:'预览 pixel.png',exact:true}).click();
   const imageDialog=page.getByRole('dialog',{name:'图片预览：pixel.png'});
   await imageDialog.getByRole('button',{name:'下载原图',exact:true}).click();
@@ -131,8 +179,9 @@ try {
   await imageDialog.getByRole('button',{name:'打开',exact:true}).waitFor();
   await imageDialog.getByRole('button',{name:'关闭图片预览'}).click();
   await writeFile(path.join(directory,filename),'modified');
-  await page.getByLabel('sample.txt 文件操作').click();
-  await page.locator('.attachment-menu').getByRole('button',{name:'打开',exact:true}).click();
+  await fileCard.locator('.attachment-file-main').hover();
+  await fileMenuTrigger.click();
+  await fileMenu.getByRole('menuitem',{name:'用系统应用打开',exact:true}).click();
   await page.getByRole('button',{name:'下载 sample.txt',exact:true}).waitFor();
   await page.locator('#messages').evaluate(el => {el.scrollTop = 0;});
   await mkdir('test-results/attachments',{recursive:true});

@@ -37,7 +37,7 @@ try {
   await page.goto(origin);
 
   await mkdir('output/playwright', {recursive:true});
-  const toggle = page.getByRole('button', {name:'资料库',exact:true});
+  const toggle = page.getByRole('button', {name:'资料',exact:true});
   const panel = page.locator('#being-info');
   const settle = () => page.waitForFunction(() => !document.querySelector('#being-info').hasAttribute('data-animating'));
   await toggle.click();
@@ -128,7 +128,7 @@ try {
       });
       assert.equal(motion.shared,true,`${kind} uses the shared drawer`);
       assert.equal(motion.count,1,`${kind} has no competing entrance animation`);
-      assert.ok(Math.abs(motion.surfaceWidth-Math.max(motion.from,motion.to))<1,`${kind} keeps a full-width surface while sliding`);
+      assert.ok(Math.abs(motion.surfaceWidth-Math.max(motion.from,motion.to))<1,`${kind} keeps a full-width surface while sliding: ${JSON.stringify(motion)}`);
       assert.ok(motion.width>Math.min(motion.from,motion.to) && motion.width<Math.max(motion.from,motion.to),`${kind} ${open?'opens':'closes'} continuously: ${JSON.stringify(motion)}`);
       await page.waitForFunction(selector => !document.querySelector(selector)?.hasAttribute('data-animating'),selector);
     }

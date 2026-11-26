@@ -1,0 +1,12 @@
+.viewport {
+  position: relative;
+
+  &:has(> [inert]) {
+    overflow: clip;
+  }
+
+  > [inert] {
+    position: absolute;
+    inset: 0 0 auto;
+  }
+}

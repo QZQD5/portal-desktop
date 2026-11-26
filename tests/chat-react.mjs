@@ -107,6 +107,11 @@ const server = createServer(async (request, response) => {
     setTimeout(() => {
       event(response, 'tool_use', { name: 'read_file', input: { path: '/tmp/fixture.txt' } });
       event(response, 'tool_result', { name: 'read_file', summary: 'fixture file read', content: 'Full tool output\n<script>window.toolInjected = true</script>\nfinal diagnostic', is_error: false, exit_code: 0, duration_ms: 1250, total_output_bytes: 240 });
+      if (input.message === 'activity summary layout') {
+        event(response, 'tool_use', { id: 'failed-tool', name: 'read_file' });
+        event(response, 'tool_result', { toolCallId: 'failed-tool', is_error: true, content: 'fixture permission denied' });
+        event(response, 'tool_use', { id: 'pending-tool', name: 'read_file' });
+      }
       event(response, 'content_block_delta', { delta: { text: '\n\n**React 回复完成**。查看花园与篝火。' } });
       append('being', continuation ? '**React 回复完成**。查看花园与篝火。' : '开始回复。\n\n**React 回复完成**。查看花园与篝火。', input.scene_id);
       event(response, 'message_stop', { session_id: 'session-fixture' }); response.end();
@@ -233,8 +238,14 @@ try {
   const longDraft = Array.from({ length: 30 }, (_, i) => JSON.stringify({ index: i, text: '长内容，检查自动换行与光标位置。'.repeat(3) })).join('\n');
   await pasteDraft(longDraft);
   await input.press('Control+End');
-  await input.evaluate(el => { el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll')); });
-  assert.equal(await input.evaluate(el => el.scrollTop), await paint.evaluate(el => el.scrollTop));
+  await frame.locator('#input-area[data-long-draft]').waitFor();
+  const scrollTops = await editor.evaluate(el => {
+    const textarea = el.querySelector('textarea'), highlight = el.querySelector('pre');
+    textarea.scrollTop = textarea.scrollHeight;
+    textarea.dispatchEvent(new Event('scroll'));
+    return [textarea.scrollTop, highlight.scrollTop];
+  });
+  assert.equal(scrollTops[0], scrollTops[1]);
   await page.setViewportSize({ width: 390, height: 844 });
   await child().evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
   await pasteDraft('{"op":"state","initial":"家常小聚"}\n{"op":"commit"}');
@@ -333,7 +344,7 @@ try {
   assert.equal(await frame.locator('#input').evaluate(el => el instanceof HTMLTextAreaElement ? el.value : el.textContent), '保留草稿');
   await frame.locator('#messages').evaluate(el=>{el.scrollTop=0;el.dispatchEvent(new Event('scroll'));});
   await frame.locator('#chat-jump-latest').waitFor();
-  assert.match(await frame.locator('#chat-jump-latest').innerText(), /^[1-9]\d*条消息$/);
+  assert.match(await frame.locator('#chat-jump-latest').getAttribute('aria-description'), /^下方还有[1-9]\d*条消息$/);
   await frame.locator('#chat-jump-latest').click();
   await child().waitForFunction(()=>{const el=document.querySelector('#messages');return el.scrollHeight-el.scrollTop-el.clientHeight<2;});
   await frame.locator('#chat-jump-latest').waitFor({state:'hidden'});
@@ -429,9 +440,10 @@ try {
   assert.equal(requests.length, 1); assert.equal(requests[0].attachments[0].media_type, 'image/png'); assert.equal(requests[0].attachments[0].data, image.toString('base64'));
   assert.equal(await frame.locator('.run-activity').count(), 1, 'One process record per completed turn');
   assert.equal(await frame.locator('.run-activity.running').count(), 0);
-  await frame.locator('.run-activity > summary').click(); assert.match(await frame.locator('.run-list').innerText(), /fixture file read/);
+  await frame.locator('.run-activity > summary').click(); assert.match(await frame.locator('.run-list').innerText(), /fixture.txt/);
   assert.equal(await frame.locator('.run-tool-details pre').count(), 0, 'Collapsed tool details do not mount full output');
-  await frame.locator('.run-tool-details > summary').click();
+  await frame.locator('.run-entry[data-tool] > summary').click();
+  assert.match(await frame.locator('.run-tool-details').innerText(), /fixture file read/);
   await frame.locator('.run-tool-details pre').filter({hasText:'final diagnostic'}).waitFor();
   assert.match(await frame.locator('.run-tool-details').innerText(), /退出码\s*0/);
   assert.match(await frame.locator('.run-tool-details').innerText(), /1.25 秒/);
@@ -474,7 +486,17 @@ try {
   await post({type:'beings:appearance',theme:'light'});
 
   await post({type:'beings:reasoning-display',show:true});
-  await frame.locator('.run-activity.running').waitFor();
+  const thinkingSummary = frame.locator('.run-activity.running > summary');
+  const thinkingSpinner = thinkingSummary.locator('.run-icon');
+  const restingBackground = await thinkingSummary.evaluate(el => getComputedStyle(el).backgroundColor);
+  await thinkingSpinner.hover();
+  assert.notEqual(await thinkingSummary.evaluate(el => getComputedStyle(el).backgroundColor), restingBackground);
+  assert.equal(await thinkingSpinner.evaluate(el => {
+    const icon = el.getBoundingClientRect();
+    const summary = el.closest('summary').getBoundingClientRect();
+    return icon.left > summary.left && icon.right < summary.right &&
+      Math.abs((icon.top + icon.bottom) - (summary.top + summary.bottom)) <= 2;
+  }), true, 'The spinner is centered inside the summary hover target');
 
   // Release the first token only after inspecting the waiting state. Sending it
   // with `thinking` made the screenshot race an intentionally removed indicator.
@@ -485,12 +507,13 @@ try {
   await pasteDraft('   ');
   assert.equal(await frame.locator('#send-btn').getAttribute('aria-label'), '停止处理');
   await pasteDraft('继续补充');
-  assert.equal(await frame.locator('#send-btn').getAttribute('aria-label'), '立即打断并发送');
+  assert.equal(await frame.locator('#send-btn').getAttribute('aria-label'), '引导');
   await pasteDraft('');
   await frame.getByRole('button', {name:'停止处理',exact:true}).waitFor();
   await frame.locator('#file-input').setInputFiles({ name: 'splice.txt', mimeType: 'text/plain', buffer: Buffer.from('splice attachment') });
   await frame.locator('#pending-files.active').waitFor();
-  assert.equal(await frame.locator('#send-btn').getAttribute('aria-label'), '立即打断并发送', 'Attachments can be sent without text');
+  await child().waitForFunction(() => !document.querySelector('#send-btn').disabled);
+  assert.equal(await frame.locator('#send-btn').isEnabled(), true, 'Attachments can be sent without text after reading completes');
   await pasteDraft('additional input'); await frame.locator('#send-btn').click();
   await waitUntil(() => requests.at(-1)?.message === 'additional input', 'The interrupting message reaches the server');
   assert.equal(requests.at(-1).attachments[0].data, Buffer.from('splice attachment').toString('base64'));
@@ -501,7 +524,7 @@ try {
   assert.equal(activeDuringHold.finished, false);
   assert.ok(activeDuringHold.events.some(item => item.event === 'content_block_delta'));
   await frame.locator('#send-btn.stop').click();
-  await frame.getByText(/停止尚未确认，仍在接收回复/).waitFor();
+  await frame.getByRole('alert').filter({hasText:'停止请求尚未确认'}).waitFor({state:'attached'});
   await frame.getByRole('button', {name:'再次停止',exact:true}).waitFor();
   // Recheck the live task after the attention debounce, as a slow CI run does.
   await page.waitForTimeout(1600);
@@ -513,7 +536,7 @@ try {
   rejectStop = false;
   await frame.getByRole('button', {name:'再次停止',exact:true}).click();
   await frame.locator('.run-activity[data-outcome="stopped"]').waitFor(); assert.equal(stopCount, 2);
-  await pasteDraft('http-error'); await frame.locator('#send-btn').click(); await frame.getByText(/fixture request failed/).waitFor();
+  await pasteDraft('http-error'); await frame.locator('#send-btn').click(); await frame.getByRole('alert').filter({hasText:'fixture request failed'}).waitFor({state:'attached'});
   assert.equal(await frame.locator('.run-activity.running').count(), 0);
   assert.equal(await frame.locator('.run-activity').last().getAttribute('data-outcome'), 'error');
   await pasteDraft('');
@@ -544,7 +567,7 @@ try {
   // Keep a Markdown fence open across actual streamed React updates, then reload it from history.
   await pasteDraft('markdown-stream'); await frame.locator('#send-btn').click();
   const streamedMarkdown = frame.locator('.markdown-code-block').last();
-  await streamedMarkdown.locator('.markdown-preview h1').waitFor();
+  await streamedMarkdown.getByRole('heading', { name: markdownPrefix.slice(2), exact: true }).waitFor();
   assert.equal(await streamedMarkdown.locator('h1').textContent(), markdownPrefix.slice(2), 'An unfinished Markdown fence is previewed during streaming');
   await post({ type: 'beings:history-scope', scope: 'all', revision: 'fixture' });
   await page.waitForFunction(() => window.received.some(item => item.type === 'beings:history-scope-state' && item.scope === 'all'));
@@ -564,10 +587,13 @@ try {
   event(markdownResponse, 'message_stop', { session_id: 'session-fixture' });
   markdownResponse.end(); markdownResponse = null;
   await frame.locator('.run-activity.running').waitFor({ state: 'hidden' });
-  assert.equal(await streamedMarkdown.locator('.markdown-preview').getByText('末尾校验：全文结束。', { exact: true }).count(), 1);
   assert.equal(await child().evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  // A taller viewport lets the entire block fit inside the scrolling message pane for visual QA.
+  // Keep the final line mounted when history reconciliation replaces the
+  // live row in the narrow timeline.
   await page.setViewportSize({ width: 420, height: 1400 });
+  const finalLine = streamedMarkdown.locator('.markdown-preview').getByText('末尾校验：全文结束。', { exact: true });
+  await finalLine.waitFor();
+  assert.equal(await finalLine.count(), 1);
   await streamedMarkdown.screenshot({ path: 'test-results/chat-markdown-preview-dark-mobile.png' });
   await streamedMarkdown.getByRole('button', { name: '源码', exact: true }).click();
   assert.equal(await streamedMarkdown.locator('code.lang-md').textContent(), markdownSource, 'Finishing the fence retains all source text');
@@ -577,6 +603,88 @@ try {
   await streamedMarkdown.locator('.markdown-preview h1').waitFor();
   await streamedMarkdown.getByRole('button', { name: '源码', exact: true }).click();
   assert.equal(await streamedMarkdown.locator('code.lang-md').textContent(), markdownSource, 'History reload preserves the streamed Markdown');
+
+  const lead = '请检查下面的长 JSON ';
+  const rawJSON = JSON.stringify({ token: 'x'.repeat(512), events: Array.from({ length: 120 }, (_, seq) => ({
+    seq, data: { delta: { text: '｜DSML｜ `literal` **a  b** \\ </footer>' } },
+  })) }, null, 2);
+  await input.click();
+  await page.keyboard.insertText(lead);
+  await input.evaluate((el, text) => {
+    const clipboardData = new DataTransfer();
+    clipboardData.setData('text/plain', text);
+    el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData }));
+  }, rawJSON);
+  assert.equal(await input.inputValue(), lead + rawJSON);
+  assert.equal(await input.evaluate(el => el.selectionStart), lead.length + rawJSON.length);
+  // Make a temporarily invalid edit, then restore valid JSON in the same draft.
+  await input.press('Backspace');
+  await page.keyboard.insertText(',\n  "edited": true\n}');
+  const expectedJSONMessage = lead + rawJSON.slice(0, -1) + ',\n  "edited": true\n}';
+  assert.equal(await input.inputValue(), expectedJSONMessage);
+  const jsonBubble = frame.locator('.message.user').filter({ hasText: lead.trim() });
+  await frame.locator('#send-btn').click();
+  await jsonBubble.waitFor();
+  assert.equal(await jsonBubble.locator('.content').textContent(), expectedJSONMessage);
+  await waitUntil(() => requests.at(-1)?.message === expectedJSONMessage, 'JSON is sent without rewriting');
+  const jsonSeq = history.find(row => row.content === expectedJSONMessage).seq;
+  const replySeq = jsonSeq + 1;
+  await waitUntil(() => history.some(row => row.seq === replySeq && row.role === 'being'), 'JSON reply is persisted');
+  await frame.locator('.message.being').filter({ hasText: 'React 回复完成' }).last().waitFor();
+  await page.reload();
+  await frame.locator(`.message.being[data-history-seq="${replySeq}"]`).waitFor();
+  assert.equal(await jsonBubble.count(), 1);
+  assert.equal(await jsonBubble.getAttribute('data-history-seq'), String(jsonSeq));
+  assert.equal(await jsonBubble.locator('.content').textContent(), expectedJSONMessage);
+  assert.equal(await jsonBubble.locator('.content').evaluate(bubble => bubble.scrollWidth <= bubble.clientWidth), true);
+  assert.deepEqual(await frame.locator(`.message[data-history-seq="${jsonSeq}"], .message[data-history-seq="${replySeq}"]`)
+    .evaluateAll(items => items.map(item => Number(item.dataset.historySeq))), [jsonSeq, replySeq]);
+
+  await page.setViewportSize({width:390,height:844});
+  await post({type:'beings:reasoning-display',show:true});
+  await input.fill('activity summary layout');
+  await frame.locator('#send-btn').click();
+  const activitySummary = frame.locator('.run-activity[data-outcome="done"] > summary').filter({hasText:'1 次结果未确认'});
+  assert.match(await activitySummary.innerText(), /用时 .+秒\s+1 次工具调用失败\s+1 次结果未确认/);
+  assert.equal(await activitySummary.evaluate(el => {
+    const items = Array.from(el.querySelectorAll('.run-elapsed, .run-failures, :scope > span:not([class])'));
+    const centers = items.map(item => {
+      const rect = item.getBoundingClientRect();
+      return rect.top + rect.height / 2;
+    });
+    return items.length === 3 && Math.max(...centers) - Math.min(...centers) <= 1 &&
+      el.scrollWidth <= el.clientWidth + 1 &&
+      items.every(item => getComputedStyle(item).whiteSpace === 'nowrap' && item.scrollWidth <= item.clientWidth + 1);
+  }), true, 'Elapsed time, failed calls and unconfirmed calls fit on one line');
+
+  await post({type:'beings:reasoning-display',show:false});
+  await activitySummary.waitFor({state:'detached'});
+  const failedRun = frame.locator('.run-activity[data-outcome="done"]').filter({hasText:'1 次工具调用失败'});
+  await failedRun.locator(':scope > summary').click();
+  await failedRun.locator('.run-entry-title').getByText('read_file', {exact:true}).waitFor();
+  await failedRun.locator('.run-tool-details pre').getByText('fixture permission denied', {exact:true}).waitFor();
+  assert.equal(await failedRun.locator('.run-entry').count(), 1);
+  await input.fill('follow up after failed tool');
+  await frame.locator('#send-btn').click();
+  await waitUntil(() => history.some(row => row.content === 'follow up after failed tool' && history.some(reply => reply.seq === row.seq + 1 && reply.role === 'being')), 'Follow-up reply is persisted');
+  await frame.locator('.message.being').filter({hasText:'React 回复完成'}).last().waitFor();
+  await failedRun.locator('.run-tool-details pre').getByText('fixture permission denied', {exact:true}).waitFor();
+
+  await child().evaluate(() => {
+    navigator.clipboard.writeText = async text => { window.copiedConversation = text; };
+  });
+  const selectedMessage = frame.locator('.message.user').filter({hasText:'activity summary layout'});
+  await selectedMessage.locator('.message-bubble-body').hover();
+  await selectedMessage.getByRole('button', {name:'更多消息操作', exact:true}).click();
+  await frame.getByRole('menuitem', {name:'复制对话流 JSON', exact:true}).press('Enter');
+  const exported = await child().evaluate(() => JSON.parse(window.copiedConversation));
+  assert.equal(exported.version, 1);
+  assert.deepEqual(exported.timeline.filter(item => item.role === 'user').map(item => item.text), ['activity summary layout']);
+  assert(exported.timeline.some(item => item.role === 'being' && item.text.includes('React 回复完成')));
+  const trace = exported.timeline.find(item => item.kind === 'run').entries;
+  assert(trace.some(entry => entry.type === 'think' && entry.text.includes('检查 React 状态与协议')));
+  assert(trace.some(entry => entry.error && entry.toolCallId === 'failed-tool' && entry.resultDetail === 'fixture permission denied'));
+
   // The standalone browser build exposes its own React settings controls.
   await page.goto(origin + '/loom.html');
   await page.getByRole('button', { name: '模型设置', exact: true }).click();

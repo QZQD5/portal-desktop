@@ -1,4 +1,5 @@
 import { WorkspaceDrawer } from "../shared/components/workspace-drawer";
+import { Icon } from "../shared/icons/icon";
 import {
   useCallback,
   useEffect,
@@ -28,7 +29,7 @@ export function Browser({ model: app }: { model: AppModel }) {
   const sendBounds = useCallback(() => {
     if (!viewport.current || !app.api) return;
     const rect = viewport.current.getBoundingClientRect();
-    const visible = !dragging.current && !panel.current?.dataset.animating && !panel.current?.hidden && rect.width > 0 && rect.height > 0 && app.startup === "ready" && !document.querySelector("dialog[open]");
+    const visible = state.open && !dragging.current && !panel.current?.dataset.animating && !panel.current?.hidden && rect.width > 0 && rect.height > 0 && app.startup === "ready" && !document.querySelector("dialog[open]");
     const { x, y, width, height } = visible ? rect : { x:0, y:0, width:0, height:0 };
     const bounds = { x, y, width, height, visible };
     const previous = lastBounds.current;
@@ -37,7 +38,7 @@ export function Browser({ model: app }: { model: AppModel }) {
     void app.api
       .browserBounds(bounds)
       .catch(error => { if (lastBounds.current === bounds) lastBounds.current = null; app.toast(error); });
-  }, [app]);
+  }, [app, state.open]);
   const setDragging = useCallback(
     (active: boolean) => {
       dragging.current = active;
@@ -133,14 +134,14 @@ export function Browser({ model: app }: { model: AppModel }) {
           disabled={!state.address}
           onClick={() => act("external")}
         >
-          ↗
+          <Icon name="arrow-up-right-16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" />
         </button>
         <button
           id="browser-close"
           aria-label="关闭浏览器"
           onClick={() => act("close")}
         >
-          ×
+          <Icon name="close" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" />
         </button>
       </div>
       <form
@@ -159,7 +160,7 @@ export function Browser({ model: app }: { model: AppModel }) {
           disabled={!state.canGoBack}
           onClick={() => act("back")}
         >
-          ←
+          <Icon name="chevron-left-20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" />
         </button>
         <button
           type="button"
@@ -168,7 +169,7 @@ export function Browser({ model: app }: { model: AppModel }) {
           disabled={!state.canGoForward}
           onClick={() => act("forward")}
         >
-          →
+          <Icon name="chevron-right-20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" />
         </button>
         <button
           type="button"
@@ -176,7 +177,7 @@ export function Browser({ model: app }: { model: AppModel }) {
           aria-label={state.loading ? "停止加载" : "刷新网页"}
           onClick={() => act(state.loading ? "stop" : "reload")}
         >
-          {state.loading ? "×" : "↻"}
+          <Icon name={state.loading ? "close" : "refresh"} width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" />
         </button>
         <input
           id="browser-address"

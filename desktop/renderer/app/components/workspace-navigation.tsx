@@ -1,11 +1,15 @@
 import { ChatSceneIndicator } from "./chat-scene";
 import { NavigationIcon } from '../../shared/icons/navigation';
 import { Icon } from '../../shared/icons/icon';
+import { menuGlide } from '../../shared/components/react-bits/GlideSelectMotion';
 import { WorkspaceDrawer } from "../../shared/components/workspace-drawer";
 import { dshRuntime } from "../../plugins/dsh/runtime";
 import { PluginIcon } from "../../plugins/icon";
+import { DockTooltipGroup } from "./dock-tooltip";
+import { DockMorePanel } from "./dock-more-panel";
+import { AnimatePresence } from "motion/react";
 import { useNavigationSort } from "./use-navigation-sort";
-import { useEffect, useLayoutEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { PrivacyContent } from "../../chat/components/panels";
 import { createPortal } from "react-dom";
 import { PanelResizeHandle, usePanelWidth } from "../../shared/components/panel-resize";
@@ -13,6 +17,8 @@ import type { AppModel } from "../models/app";
 import { useModel } from "../../shared/hooks/use-model";
 import { BeingComputer } from "./being-computer";
 import { BeingLibrary } from "./home-library";
+import { beingModelRequest } from '../services/being-model-network';
+import { beingMonogram } from '../lib/being-monogram';
 
 const beingTabs = [["profile", "详情"], ["library", "资料库"], ["computer", "电脑"]] as const;
 
@@ -54,29 +60,16 @@ function RailButton({ label, children, active, disabled, unread, onClick, classN
       { transform: 'none', offset: 1 },
     ], { duration: 680, easing: 'cubic-bezier(0.2, 0.65, 0.3, 1)' });
   };
-  const tooltipId = useId();
-  const [tip, setTip] = useState<{ left: number; top: number } | null>(null);
-  const show = (element: HTMLButtonElement) => {
-    const bounds = element.getBoundingClientRect();
-    setTip({ left: bounds.right + 12, top: Math.max(24, Math.min(innerHeight - 24, bounds.top + bounds.height / 2)) });
-  };
-  return <>
-    <button data-navigation-key={navigationKey} id={id} aria-expanded={expanded} className={`rail-button ${className}`} aria-label={label + (unread ? " · 有新动态" : "")} aria-current={active ? "page" : undefined}
-      aria-describedby={tip ? tooltipId : undefined} disabled={disabled} data-plugin-navigation={plugin || undefined}
-      onPointerDown={event => {
-        setTip(null);
-        event.currentTarget.querySelector('.rail-icon-line')?.getAnimations().forEach(animation => animation.cancel());
-      }} onMouseEnter={event => { animateIcon(event.currentTarget); if (tooltip) show(event.currentTarget); }} onMouseLeave={() => setTip(null)}
-      onFocus={event => {
-        if (event.currentTarget.matches(':focus-visible')) animateIcon(event.currentTarget);
-        if (tooltip) show(event.currentTarget);
-      }} onBlur={() => setTip(null)}
-      onKeyDown={event => { if (event.key === "Escape") setTip(null); }}
-      onClick={() => { setTip(null); onClick(); }}>
-      {children}{unread && <span className="rail-unread" aria-hidden="true" />}
-    </button>
-    {tip && createPortal(<div id={tooltipId} role="tooltip" className="rail-tooltip" style={{ left: tip.left, top: tip.top }}><span>{label}{unread ? " · 有新动态" : ""}</span>{shortcut && <kbd>{shortcut}</kbd>}</div>, document.body)}
-  </>;
+  const description = label + (unread ? " · 有新动态" : "");
+  return <button data-navigation-key={navigationKey} id={id} aria-expanded={expanded} className={`rail-button ${className}`} aria-label={description} aria-current={active ? "page" : undefined}
+    data-rail-tooltip={tooltip ? description : undefined} data-rail-shortcut={tooltip ? shortcut : undefined}
+    disabled={disabled} data-plugin-navigation={plugin || undefined}
+    onPointerDown={event => event.currentTarget.querySelector('.rail-icon-line')?.getAnimations().forEach(animation => animation.cancel())}
+    onMouseEnter={event => animateIcon(event.currentTarget)}
+    onFocus={event => { if (event.currentTarget.matches(':focus-visible')) animateIcon(event.currentTarget); }}
+    onClick={onClick}>
+    {children}{unread && <span className="rail-unread" aria-hidden="true" />}
+  </button>;
 }
 
 const PINNED_NAVIGATION_KEY = "beings:pinned-navigation";
@@ -91,7 +84,8 @@ function readPinnedNavigation(): string[] {
 
 export function WorkspaceNavigation({ app }: { app: AppModel }) {
   const town = useModel(app.town), plugins = useModel(app.plugins);
-  const name = town.displayName || app.snapshot?.settings.being || "Being";
+  const beingId = (app.snapshot?.settings.being || "").trim();
+  const name = town.displayName?.trim() || beingId || "Being";
   const [pins, setPins] = useState(readPinnedNavigation);
   const [order, setOrder] = useState<string[]>(() => {
     try { const saved = JSON.parse(localStorage.getItem("beings:navigation-order") || "null");
@@ -100,6 +94,7 @@ export function WorkspaceNavigation({ app }: { app: AppModel }) {
   });
   const [moreOpen, setMoreOpen] = useState(false);
   const morePanel = useRef<HTMLDivElement>(null);
+  const railLinks = useRef<HTMLDivElement>(null);
   const closeMore = (restoreFocus = false) => {
     setMoreOpen(false);
     if (restoreFocus) document.getElementById("rail-more-trigger")?.focus();
@@ -146,18 +141,20 @@ export function WorkspaceNavigation({ app }: { app: AppModel }) {
     try { localStorage.setItem("beings:navigation-order", JSON.stringify(next)); } catch { /* Keep session order. */ }
   });
   const connected = Boolean(app.snapshot?.settings.hasToken);
+  const sceneOrderKey = `beings:scene-order:${JSON.stringify([app.snapshot?.settings.endpoint, app.snapshot?.settings.being])}`;
   return <nav className="workspace-rail" aria-label="主导航">
-    {app.startup === 'ready' && <ChatSceneIndicator
-      beingName={name} onHome={() => void app.returnToMainChat()}
+    {app.startup === 'ready' && <ChatSceneIndicator orderKey={sceneOrderKey}
+      beingName={name} beingId={beingId} onHome={() => void app.returnToMainChat()}
       createRequest={app.chatSessionCreateRequest}
       scene={app.snapshot?.chatScene} sessions={app.snapshot?.chatSessions} activity={app.chatSceneActivity}
       onSession={(operation, value, sceneId) => app.changeChatSession(operation, value, sceneId)}
       connected={connected} scope={app.chatHistoryScope}
       scopeReady={connected && !app.chatLoading && app.chatHistoryScopeKnown}
       onScope={scope => app.changeChatHistoryScope(scope)}
-      onCopy={id => void app.run(async () => { await app.api.copyText(id); app.toast('场景 ID 已复制'); })}
+      onCopy={id => void app.run(async () => { await app.api.copyText(id); app.toast('场景 ID 已复制', true); })}
     />}
-    <div className="rail-links" {...sort}>
+    <DockTooltipGroup rail={railLinks}>
+    <div className="rail-links" ref={railLinks} data-warm-tooltip-scope {...sort}>
       {orderedKeys.map(key => {
         if (key === "chat") return <RailButton key={key} navigationKey={key} id="rail-chat-trigger" tooltip={false} label="对话" shortcut={app.api.platform === 'darwin' ? '⌘1' : 'Ctrl 1'} active={app.view === "chat"} onClick={() => app.navigate("chat")}><NavigationIcon name="rail-chat" /></RailButton>;
         if (key === "search") return <RailButton key={key} navigationKey={key} id="toggle-chat-search" expanded={app.searchOpen} label="查找对话" shortcut={app.api.platform === 'darwin' ? '⌘F' : 'Ctrl F'} disabled={!app.snapshot?.settings.hasToken} onClick={() => app.openSearch()}><NavigationIcon name="rail-search" /></RailButton>;
@@ -173,8 +170,9 @@ export function WorkspaceNavigation({ app }: { app: AppModel }) {
         <NavigationIcon name={moreOpen ? "rail-collapse" : "rail-more"} />
       </RailButton>
     </div>
+    </DockTooltipGroup>
     <div className="rail-settings-placeholder" aria-hidden="true" />
-    {moreOpen && createPortal(<div ref={morePanel} className="rail-more-panel" role="dialog" aria-label="更多功能">
+    {createPortal(<AnimatePresence>{moreOpen && <DockMorePanel key="dock-more" panel={morePanel}>
       <header><div><strong>更多功能</strong><p>将常用功能固定到左侧</p></div><button aria-label="收起更多功能" onClick={() => closeMore(true)}>×</button></header>
       <div className="rail-more-list">{entries.map(entry => <div className="rail-more-row" key={entry.key}>
         <button className="rail-more-destination" aria-current={entry.active ? "page" : undefined} data-plugin-navigation={entry.plugin || undefined}
@@ -184,7 +182,7 @@ export function WorkspaceNavigation({ app }: { app: AppModel }) {
           <NavigationIcon name="rail-pin" />
         </button>
       </div>)}</div>
-    </div>, document.body)}
+    </DockMorePanel>}</AnimatePresence>, document.body)}
   </nav>;
 }
 // Load on first visit, then keep state when the tab or the whole panel is hidden.
@@ -200,14 +198,16 @@ export function BeingInfo({ app }: { app: AppModel }) {
   const [width, setWidth] = usePanelWidth("being", 320);
   const [browserHost, setBrowserHost] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => { setBrowserHost(panel.current?.parentElement || null); }, []);
-  const [tab, setTab] = useState<typeof beingTabs[number][0]>("library");
+  const [tab, setTab] = useState<typeof beingTabs[number][0]>("profile");
   const [privacyOpen, setPrivacyOpen] = useState(false);
-  useLayoutEffect(() => { if (app.beingInfoOpen) { setTab('library'); setPrivacyOpen(false); } }, [app.beingInfoOpen]);
+  useLayoutEffect(() => { if (app.beingInfoOpen) { setTab('profile'); setPrivacyOpen(false); } }, [app.beingInfoOpen]);
   const privacyEntry = useRef<HTMLButtonElement>(null);
   const privacyBack = useRef<HTMLButtonElement>(null);
   const closePrivacy = () => { setPrivacyOpen(false); requestAnimationFrame(() => privacyEntry.current?.focus()); };
   useEffect(() => { if (privacyOpen) privacyBack.current?.focus(); }, [privacyOpen]);
-  const name = town.displayName || app.snapshot?.settings.being || "Being";
+  const beingId = (app.snapshot?.settings.being || "").trim();
+  const name = town.displayName?.trim() || beingId || "Being";
+  const { initial, palette } = beingMonogram(name, beingId);
   const status = !app.snapshot?.settings.hasToken ? "未连接" : ({online:"已连接",connecting:"连接中",reconnecting:"重连中",offline:"已离线",degraded:"连接不稳定"}[app.connection] || "正在确认连接");
   const hidden = !app.beingInfoOpen || app.view !== "chat" || (app.subagentSettingsOpen && !app.settingsRoute);
   const browserAvailable = app.view === "chat" && !(app.subagentSettingsOpen && !app.settingsRoute);
@@ -225,7 +225,9 @@ export function BeingInfo({ app }: { app: AppModel }) {
   useEffect(() => {
     let active = true;
     if (!hidden && connected && !app.subagentSettingsOpen) {
-      void app.api.beingModelConfig().then(config => {
+      void beingModelRequest(app.snapshot?.settings.endpoint, '/api/llm/config').then(async response => {
+        const config = await response.json();
+        if (!response.ok) throw new Error(config.error || 'request failed');
         if (active) setModelPreview({ key: modelKey, label: typeof config.model === 'string' ? config.model : '查看与配置' });
       }).catch(() => { if (active) setModelPreview(previous => previous.key === modelKey && previous.label ? previous : { key: modelKey, label: '查看与配置' }); });
     }
@@ -241,14 +243,16 @@ export function BeingInfo({ app }: { app: AppModel }) {
     }}>
     <PanelResizeHandle panel={panel} label="调整 Being 信息宽度" width={width} onResize={setWidth} initial={320} max={900} reserve={396} disabled={hidden} />
     <div className="being-info-body">
-    <button className="close being-info-close" aria-label={privacyOpen ? "关闭隐私说明" : "关闭 Being 信息"} onClick={() => {
+    <button className="icon-button being-info-close" aria-label={privacyOpen ? "关闭隐私说明" : "关闭 Being 信息"} onClick={() => {
       if (privacyOpen) { closePrivacy(); return; }
       closeInfo();
-    }} />
+    }}><Icon name="chat-close" width={17} height={17} /></button>
     <div className="being-overview" hidden={privacyOpen}>
+    <div className="being-home-title">Being Home</div>
     <div className="being-profile">
-      <div className="being-avatar" aria-hidden="true">{name.slice(0, 1).toUpperCase()}</div>
-      <h2>{name}</h2><p className="being-status" data-online={app.connection === "online"}><span aria-hidden="true" />{status}</p>
+      <div className="being-avatar" data-palette={palette} aria-hidden="true">{initial}</div>
+      <h2>{name}</h2>
+      <p className="being-status" data-online={app.connection === "online"}><span aria-hidden="true" />{status}</p>
     </div>
     <div className="being-tabs" role="tablist" aria-label="Being 信息分类">
       {beingTabs.map(([key,label], index) => <button type="button" key={key} id={`being-${key}-tab`} role="tab" aria-selected={tab === key} aria-controls={`being-${key}-panel`} tabIndex={tab === key ? 0 : -1}
@@ -268,16 +272,19 @@ export function BeingInfo({ app }: { app: AppModel }) {
     <section id="being-profile-panel" role="tabpanel" tabIndex={0} aria-labelledby="being-profile-tab" hidden={tab !== "profile"}>
       <h3>当前状态</h3>
       <dl className="being-details">
-        <div><dt><Icon name="chat-outline" />当前场景</dt><dd>{app.snapshot?.chatScene?.scene_meta.scene_label || "尚未创建"}</dd></div>
-        <div><dt><Icon name="sun-20" />自主醒来</dt><dd><button className="being-wake-switch" type="button" role="switch" aria-label="自主醒来" aria-checked={app.sbsKnown && app.sbsEnabled} disabled={!app.snapshot?.settings.hasToken || !app.sbsKnown || app.chatLoading} onClick={() => app.toggleSbs()}>
+        <div><dt><Icon name="lucide-message-circle" />当前场景</dt><dd>{app.snapshot?.chatScene?.scene_meta.scene_label || "尚未创建"}</dd></div>
+        <div><dt><Icon name="lucide-sun" />自主醒来</dt><dd><button className="being-wake-switch" type="button" role="switch" aria-label="自主醒来" aria-checked={app.sbsKnown && app.sbsEnabled} disabled={!app.snapshot?.settings.hasToken || !app.sbsKnown || app.chatLoading} onClick={() => app.toggleSbs()}>
           <span>{app.sbsKnown ? app.sbsEnabled ? "已开启" : "已关闭" : "待同步"}</span><span className="being-wake-track" aria-hidden="true" />
         </button></dd></div>
       </dl>
       <h3>配置</h3>
-      <button className="being-action-row" onClick={() => app.openAppSettings()}><Icon name="settings-plugins" /><span className="being-action-copy">应用设置</span><Icon className="being-action-chevron" name="chevron-right-20" /></button>
-      <button className="being-action-row being-model-entry" disabled={!connected} onClick={() => app.openModelSettings()}><Icon name="settings-models" /><span className="being-action-copy"><strong>模型设置</strong><small>{connected ? currentModel || "正在读取模型…" : "连接后配置模型"}</small></span><Icon className="being-action-chevron" name="chevron-right-20" /></button>
-      <button ref={privacyEntry} className="being-action-row" onClick={() => setPrivacyOpen(true)}><Icon name="permission-shield" /><span className="being-action-copy">隐私说明</span><Icon className="being-action-chevron" name="chevron-right-20" /></button>
-      <button className="being-action-row being-connect" onClick={() => app.showSettings()}><Icon name="menu-settings" /><span className="being-action-copy">连接设置</span><Icon className="being-action-chevron" name="chevron-right-20" /></button>
+      <div className="being-config-actions" {...menuGlide}>
+        <span className="glide-select__pill" aria-hidden="true" />
+        <button className="being-action-row" onClick={() => app.openAppSettings()}><Icon name="lucide-layout-grid" /><span className="being-action-copy">应用设置</span><Icon className="being-action-chevron" name="chat-chevron-right" /></button>
+        <button className="being-action-row being-model-entry" disabled={!connected} onClick={() => app.openModelSettings()}><Icon name="lucide-layers" /><span className="being-action-copy">模型设置</span><small>{connected ? currentModel || "正在读取模型…" : "连接后配置模型"}</small><Icon className="being-action-chevron" name="chat-chevron-right" /></button>
+        <button ref={privacyEntry} className="being-action-row" onClick={() => setPrivacyOpen(true)}><Icon name="lucide-shield-check" /><span className="being-action-copy">隐私说明</span><Icon className="being-action-chevron" name="chat-chevron-right" /></button>
+        <button className="being-action-row being-connect" onClick={() => app.showSettings()}><Icon name="lucide-sliders-horizontal" /><span className="being-action-copy">连接设置</span><Icon className="being-action-chevron" name="chat-chevron-right" /></button>
+      </div>
     </section>
     <section id="being-library-panel" role="tabpanel" tabIndex={0} aria-labelledby="being-library-tab" hidden={tab !== "library"}>
       <RetainedBeingTab key={modelKey} active={libraryActive}><BeingLibrary api={app.api.home} active={libraryActive} onConnect={() => setTab('computer')} /></RetainedBeingTab>

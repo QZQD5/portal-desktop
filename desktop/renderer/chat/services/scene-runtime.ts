@@ -4,7 +4,7 @@ import { AttachmentMessages, attachmentMessageReader, releaseAttachmentMessageRe
 import { SceneQueueStore } from "./scene-queue";
 import type { SavedSceneSend } from "./scene-queue";
 import { inCurrentScene, messageScene, stripSceneTransition, withSceneTransition } from "../models/scenes";
-import type { ChatRuntime, ChatState, RuntimeOptions } from "../models/chat";
+import type { ChatRuntime, ChatState, RuntimeOptions, Message } from "../models/chat";
 
 /** One Being coordinator; scene-local state is not a separate agent or breath. */
 export function createSceneRuntime(state: ChatState, options: RuntimeOptions, createRuntime: any): ChatRuntime {
@@ -135,33 +135,48 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
   }
   function attachQueued(target: any, entry: any, saved: any, persisted = true) {
     entry.sendOptions = { ...entry.sendOptions, clientRequestId: saved.id };
-    const queued = { session: target, entry, saved, persisted, claimed: false, cancelled: false, controller: new AbortController() };
+    const queued = { session: target, entry, saved, persisted, claimed: false, cancelled: false, editing: false, controller: new AbortController() };
     if (saved.attachment?.messageId) entry.message.attachmentEndpoint = queueStore.endpoint;
     sendQueue.push(queued);
     entry.message.canInterruptQueued = persisted && saved.phase === "queued" && !saved.attachment;
     target.local.queued++;
-    entry.message.queueNotice = saved.phase === 'sending' ? '发送状态待确认，请先查看场景历史；不会自动重发' : undefined;
+    entry.message.queueNotice = saved.phase === 'sending' ? '发送状态待确认，请核对历史后移除待发记录' : undefined;
+    entry.message.setQueuedEditing = (editing: boolean) => {
+      if (editing && (queued.claimed || queued.cancelled || saved.phase !== 'queued' || !sendQueue.includes(queued))) return false;
+      queued.editing = editing;
+      if (!editing) scheduleDrain();
+      return true;
+    };
     entry.message.editQueued = async (text: string) => {
-      if (queued.claimed || saved.phase !== 'queued' || saved.attachment || !sendQueue.includes(queued)) return;
-      const nextText = String(text || '').trim();
-      if (!nextText) return;
-      entry.text = nextText;
-      entry.message.text = nextText;
-      saved.text = nextText;
-      try { await queueStore.write(saved); publish(); }
-      catch { entry.message.queueNotice = '无法保存编辑，请重试'; publish(); }
+      if (queued.claimed || saved.phase !== 'queued' || saved.attachment || !sendQueue.includes(queued)) return false;
+      queued.claimed = true;
+      try {
+        await queueStore.write({ ...saved, text });
+        entry.text = entry.message.text = saved.text = text;
+        queued.persisted = true;
+        entry.message.queueNotice = undefined;
+        entry.message.retry = undefined;
+        return true;
+      } catch {
+        entry.message.queueNotice = '无法保存编辑，请重试';
+        entry.message.queueNoticeTone = 'error';
+        return false;
+      } finally {
+        queued.claimed = false;
+        publish();
+      }
     };
     entry.message.moveQueued = async (offset: number) => {
-      const peers = sendQueue.filter(item => item.session === queued.session);
+      const peers = sendQueue.filter(item => item.session === queued.session && item.saved.phase === 'queued' && !item.claimed);
       const destination = Math.max(0, Math.min(peers.length - 1, peers.indexOf(queued) + (offset < 0 ? -1 : 1)));
       await entry.message.reorderQueued?.(peers[destination]?.entry.message.id || '');
     };
     entry.message.reorderQueued = async (targetId: string) => {
       if (queued.claimed || saved.phase !== 'queued' || !sendQueue.includes(queued)) return;
       const current = sendQueue.indexOf(queued);
-      const peers = sendQueue.filter(item => item.session === queued.session);
+      const peers = sendQueue.filter(item => item.session === queued.session && item.saved.phase === 'queued' && !item.claimed);
       const peerIndex = peers.indexOf(queued), destination = peers.findIndex(item => item.entry.message.id === targetId);
-      if (destination < 0) return;
+      if (peerIndex < 0 || destination < 0) return;
       if (destination === peerIndex) return;
       const other = peers[destination];
       const movingDown = peerIndex < destination;
@@ -179,20 +194,22 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
       }
       try {
         await Promise.all(sendQueue.map((item, index) => { item.saved.order = index; return queueStore.write(item.saved); }));
+        if (entry.message.queueNotice === '无法保存排序，请重试') entry.message.queueNotice = undefined;
         publish(); scheduleDrain();
-      } catch { entry.message.queueNotice = '无法保存排序，请重试'; publish(); }
+      } catch { entry.message.queueNotice = '无法保存排序，请重试'; entry.message.queueNoticeTone = 'error'; publish(); }
     };
     entry.message.cancelQueued = async () => {
       if (queued.claimed && (!saved.attachment || saved.phase === 'sending')) return;
       queued.cancelled = true;
       queued.controller.abort();
       queued.claimed = true;
-      if (saved.attachment?.messageId) {
+      // An uncertain send can only be removed locally; it may already be accepted.
+      if (saved.attachment?.messageId && saved.phase !== 'sending') {
         try { await new AttachmentMessages(attachmentRequest(saved.scene.sceneId)).update(saved.attachment.messageId, {delivery_status:'cancelled'}); }
         catch { entry.message.queueNotice = '本地已取消；服务端状态尚未同步'; }
       }
       try { await queueStore.write(saved.id); }
-      catch { queued.claimed = false; entry.message.queueNotice = '无法保存取消操作，请重试'; publish(); return; }
+      catch { queued.claimed = false; entry.message.queueNotice = '无法保存取消操作，请重试'; entry.message.queueNoticeTone = 'error'; publish(); return; }
       const index = sendQueue.indexOf(queued);
       if (index < 0) return;
       detachQueued(queued);
@@ -201,7 +218,7 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
     };
     entry.message.interruptQueued = () => {
       submission = submission.then(async () => {
-        if (disposed || queued.claimed || !sendQueue.includes(queued) || !queued.persisted || saved.phase !== 'queued' || saved.attachment) return;
+        if (disposed || queued.editing || queued.claimed || !sendQueue.includes(queued) || !queued.persisted || saved.phase !== 'queued' || saved.attachment) return;
         if ([...sessions.values()].some(other => other !== target && busy(other))) return;
         queued.claimed = true;
         try {
@@ -217,6 +234,7 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
             .catch(() => { /* Keep the durable uncertain record for reconciliation. */ });
         } catch {
           entry.message.queueNotice = '无法保存发送状态，请重试';
+          entry.message.queueNoticeTone = 'error';
         } finally { queued.claimed = false; publish(); }
       });
       return submission;
@@ -229,11 +247,14 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
     sendQueue.splice(index, 1);
     queued.session.local.queued = Math.max(0, queued.session.local.queued - 1);
     if (sent) {
-      state.items = [...state.items.filter((item: any) => item !== queued.entry.message), queued.entry.message];
-      queued.entry.message.createdAt = queued.saved.createdAt;
+      if (!queued.saved.attachment) {
+        state.items = [...state.items.filter((item: any) => item !== queued.entry.message), queued.entry.message];
+        queued.entry.message.createdAt = queued.saved.createdAt;
+      }
       queued.entry.message.queued = false;
       queued.entry.message.cancelQueued = undefined;
       queued.entry.message.interruptQueued = undefined;
+      queued.entry.message.setQueuedEditing = undefined;
       queued.entry.message.queueNotice = undefined;
     }
     return true;
@@ -241,11 +262,11 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
   function restoredSendWasAccepted(queued: any) {
     if (queued.saved.attachment?.messageId) return state.items.some((item: any) => item.kind === 'message' && item.role === 'user' && item.historySeq && messageReferences(item.text).includes(queued.saved.attachment.messageId));
     if (queued.saved.phase !== 'sending') return false;
-    const expected = stripSceneTransition(queued.saved.text || '').replace(/\s+/g, ' ').trim();
+    const expected = stripSceneTransition(queued.saved.text || '').replace(/\r\n/g, '\n').trim();
     if (!expected) return false;
     return state.items.some((item: any) => {
       if (item.kind !== 'message' || item.role !== 'user' || !item.historySeq || item === queued.entry.message) return false;
-      const actual = stripSceneTransition(item.text || '').replace(/\s+/g, ' ').trim();
+      const actual = stripSceneTransition(item.text || '').replace(/\r\n/g, '\n').trim();
       if (actual !== expected || !inCurrentScene(item, queued.saved.scene) || !inCurrentScene(queued.saved.scene, item)) return false;
       const sentAt = Number(queued.saved.createdAt), acceptedAt = Number(item.createdAt);
       return Number.isFinite(sentAt) && Number.isFinite(acceptedAt) && Math.abs(sentAt - acceptedAt) <= 2 * 60 * 1000;
@@ -267,9 +288,11 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
       drainScheduled = false;
       if (disposed || dispatching || [...sessions.values()].some(busy)) { retryDrain(); return; }
       const next = sendQueue.find(next => next.saved.phase !== 'failed');
-      if (!next || next.claimed || ['sending','failed'].includes(next.saved.phase) || !next.persisted) return;
+      if (!next || next.editing || next.claimed || next.cancelled || next.session.local.stopping || ['sending','failed'].includes(next.saved.phase) || !next.persisted) return;
       next.claimed = true;
       dispatching = true;
+      next.entry.message.queueNotice = undefined;
+      publish();
       try {
         // Refresh can erase local activity flags; check the actual breath first.
         const response = await owner.runtime.request('/api/stream/active', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
@@ -280,7 +303,7 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
         }
         if (disposed || next.cancelled || [...sessions.values()].some(busy)) { retryDrain(); return; }
         if (next.saved.attachment) {
-          next.saved.phase = 'preparing'; await queuedSave(next);
+          next.saved.phase = 'preparing'; publish(); await queuedSave(next);
           const request = attachmentRequest(next.saved.scene.sceneId, next.controller.signal);
           const views = new AttachmentMessages(request);
           const save = () => queuedSave(next);
@@ -289,7 +312,7 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
             state.items = state.items.filter((item: any) => item === next.entry.message || item.id !== 'attachment-' + view.message_id);
             messageViews.cache.set(view.message_id,view);
             next.entry.message.attachmentViews = [view]; next.entry.message.attachmentEndpoint = queueStore.endpoint;
-            next.entry.message.queueNotice = view.delivery_status === 'pending' ? '附件处理中，完成后发送' : undefined; publish();
+            next.entry.message.queueNotice = undefined; publish();
           };
           const context = await prepareAttachments({key:next.saved.id, text:next.saved.text, files:next.saved.files,
             sceneId:next.saved.scene.sceneId!, sceneLabel:next.saved.scene.sceneLabel, transfer:next.saved.attachment,
@@ -300,6 +323,9 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
           if (disposed || next.cancelled) return;
           // Another scene can start while parsing. Retain the prepared identifiers and wait.
           if ([...sessions.values()].some(busy)) { next.saved.phase = 'queued'; await save(); retryDrain(); return; }
+          // Place the user bubble before send creates the wait/run row. Moving
+          // it on acknowledgement would leave that row under the last reply.
+          state.items = [...state.items.filter(item => item !== next.entry.message), next.entry.message];
           await next.session.runtime.send(next.entry.text || `[发送了 ${next.entry.files.length} 个文件]`, [], {
             ...next.entry.sendOptions, queuedMessage:next.entry.message, requestMessage:context,
             attachmentDelivery: async (status: string) => {
@@ -312,8 +338,16 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
                 next.saved.attachment.delivery = status;
                 if (status === 'accepted' || status === 'unknown') detachQueued(next, true);
                 else { next.saved.phase = 'failed'; next.entry.message.queued = true; }
-                try { await save(); show(await views.update(next.saved.attachment.messageId!, {delivery_status:status})); }
+                try { await save(); }
                 catch { next.entry.message.queueNotice = '发送状态尚未同步，请核对历史'; }
+                // The Heart response owns the reply stream. A slow attachment
+                // status write must not block reading SSE or starting catch-up.
+                const sync = views.update(next.saved.attachment.messageId!, {delivery_status:status}).then(show, () => {
+                  if (disposed) return;
+                  next.entry.message.queueNotice = '发送状态尚未同步，请核对历史';
+                  publish();
+                });
+                if (status !== 'accepted') await sync;
               }
             },
           });
@@ -344,15 +378,20 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
       } catch (error) {
         if (next.saved.attachment && !disposed && !next.cancelled) {
           next.saved.phase = next.saved.attachment.delivery === 'sending' || next.saved.attachment.delivery === 'unknown' ? 'sending' : 'failed';
+          next.saved.error = error instanceof Error ? error.message : '附件处理失败';
           try { await queueStore.write(next.saved); } catch { /* Keep existing conservative checkpoint. */ }
-          next.entry.message.queueNotice = error instanceof Error ? error.message : '附件处理失败';
+          next.entry.message.queueNotice = next.saved.error;
           next.entry.message.retryLabel = '重试附件处理';
           if (next.saved.phase === 'failed') next.entry.message.retry = async () => {
             for (const file of next.saved.files) if (file.parseFailed) { file.jobId = undefined; file.forceParse = true; file.parseFailed = false; }
-            next.saved.phase = 'queued'; await queueStore.write(next.saved);
+            next.saved.phase = 'queued'; next.saved.error = undefined; await queueStore.write(next.saved);
             next.entry.message.retry = undefined; next.entry.message.queueNotice = undefined; scheduleDrain(); publish();
           };
-        } else if (sendQueue.includes(next)) { next.entry.message.queueNotice = '等待连接或本地存储恢复'; retryDrain(); }
+        } else if (sendQueue.includes(next)) {
+          next.entry.message.queueNotice = '等待连接或本地存储恢复';
+          next.entry.message.queueNoticeTone = 'neutral';
+          retryDrain();
+        }
       } finally {
         next.claimed = false;
         dispatching = false;
@@ -366,23 +405,35 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
     const status = session.runtime?.sceneActivity();
     const queued = sendQueue.some(next => next.session === session && next.saved.phase !== 'failed');
     const failed = sendQueue.some(next => next.session === session && next.saved.phase === 'failed');
+    if (status && ["queued", "thinking", "replying", "working", "waiting", "reconnecting"].includes(status)) return status;
     const tasks = (state.sceneTasks || []).filter((t: any) => t.sceneId === session.local.currentScene.sceneId);
     if (tasks.some((t: any) => t.status === 'running' || t.status === 'queued')) return 'working';
     if (status === 'error' || status === 'timeout' || status === 'stopped') return queued ? 'queued' : status;
     // Creation order is not completion order: an earlier slow task can finish
     // after a stage reply for a later fast task. Inspect every pending result.
-    const currentTasks = tasks.filter((t: any) => !session.submittedAt || t.createdAt >= session.submittedAt);
-    const repliedAt = session.runtime?.replyCompletedAt?.() || 0;
-    if (!['thinking','replying'].includes(status)) {
-      if (currentTasks.some((t: any) => ['failed','interrupted','budget_exhausted','timeout'].includes(t.status) &&
-          (!t.endedAt || t.endedAt > repliedAt))) return 'error';
-      if (session.submittedAt && currentTasks.some((t: any) => t.status === 'done' && t.endedAt > repliedAt)) return 'waiting';
-    }
-    return status && ["queued", "thinking", "replying", "working", "waiting", "reconnecting"].includes(status) ? status :
-      queued ? "queued" : failed ? "error" : status;
+    // Refresh loses the live submission/confirmation timestamps. Recover the
+    // latest turn from this scene's messages instead of reviving all old failures.
+    const messages = tasks.length ? (state.items || []).filter((item): item is Message => item.kind === 'message' &&
+      item.sceneId === session.local.currentScene.sceneId && !item.queued).reverse() : [];
+    const latestUser = messages.find(item => item.role === 'user');
+    const submittedAt = Math.max(session.submittedAt || 0, latestUser?.createdAt || 0);
+    const currentTasks = tasks.filter((t: any) => submittedAt && t.createdAt >= submittedAt);
+    const finalReply = messages.find(item => item.role === 'being' &&
+      !item.streaming && !item.interim && (item.createdAt || 0) >= submittedAt);
+    const repliedAt = Math.max(session.runtime?.replyCompletedAt?.() || 0, finalReply?.createdAt || 0);
+    if (currentTasks.some((t: any) => ['failed','interrupted','budget_exhausted','timeout'].includes(t.status) &&
+        (!t.endedAt || t.endedAt > repliedAt))) return 'task-failed';
+    if (submittedAt && currentTasks.some((t: any) => t.status === 'done' && t.endedAt > repliedAt)) return 'waiting';
+    return queued ? "queued" : failed ? "send-failed" : status;
   };
   function publish() {
     if (disposed || !selected) return;
+    for (const queued of sendQueue) {
+      const { saved, entry, claimed, persisted } = queued;
+      entry.message.queuePhase = saved.phase;
+      entry.message.queueBusy = claimed;
+      entry.message.canInterruptQueued = persisted && !claimed && saved.phase === 'queued' && !saved.attachment;
+    }
     for (const key of localKeys) {
       if (key !== "currentScene" && key !== "draft") (state as any)[key] = selected.local[key];
     }
@@ -392,7 +443,7 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
     const autonomous = [...sessions.values()].find(session => session.runtime?.activeAutonomousOrigin?.());
     state.sbsStreamingOrigin = autonomous?.runtime?.activeAutonomousOrigin?.();
     state.sbsActivityPhase = autonomous?.runtime?.autonomousPhase?.();
-    state.attachmentPending = sendQueue.some(next => next.session === selected && next.saved.attachment && !['sending','failed'].includes(next.saved.phase));
+    state.attachmentPending = sendQueue.some(next => next.session === selected && next.saved.phase === 'preparing' && !next.cancelled);
     state.sendWillQueue = sendQueue.some(next => next.saved.phase !== 'failed') || [...sessions.values()].some(busy);
     state.canInterruptQueue = ![...sessions.values()].some(session => session !== selected && busy(session));
     const activity = Object.fromEntries([...sessions.entries()].flatMap(([id, session]) => {
@@ -525,11 +576,11 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
             if (row.phase === 'preparing') row.phase = 'queued';
             attachQueued(target, entry, row);
             if (row.phase === 'failed') {
-              entry.message.queueNotice = '上次附件处理失败，请重试或取消';
+              entry.message.queueNotice = row.error || '上次附件处理失败，请重试或删除这条排队消息';
               entry.message.retryLabel = '重试附件处理';
               entry.message.retry = async () => {
                 for (const file of row.files) if (file.parseFailed) { file.jobId = undefined; file.forceParse = true; file.parseFailed = false; }
-                row.phase = 'queued'; await queueStore.write(row); entry.message.retry = undefined; scheduleDrain(); publish();
+                row.phase = 'queued'; row.error = undefined; await queueStore.write(row); entry.message.retry = undefined; entry.message.queueNotice = undefined; scheduleDrain(); publish();
               };
             }
           }
@@ -590,8 +641,26 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
             createdAt: entry.message.createdAt || Date.now(), order: sendQueue.length, phase: 'queued', sendOptions: entry.sendOptions, ...(hasAttachments ? {attachment:{delivery:'pending'}} : {}) };
           const queued = attachQueued(target, entry, saved, false);
           if (hasAttachments) entry.message.attachmentUploads = saved.files.map(f => ({name:f.name,size:f.size,mime:f.type,blob:f.blob,progress:f.uploadProgress || (f.attachmentId ? {phase:'complete',loaded:f.size,total:f.size} : undefined)}));
-          try { await queueStore.write(saved); queued.persisted = true; entry.message.canInterruptQueued = !saved.attachment; }
-          catch { entry.message.queueNotice = '排队内容未能保存，刷新可能丢失；请取消后重试'; }
+          const persist = async () => {
+            if (queued.claimed || queued.cancelled) return;
+            queued.claimed = true;
+            publish();
+            try {
+              await queueStore.write(saved);
+              queued.persisted = true;
+              entry.message.queueNotice = undefined;
+              entry.message.retry = undefined;
+            } catch {
+              entry.message.queueNotice = '待发消息暂未保存，重试后才能发送';
+              entry.message.queueNoticeTone = 'error';
+              entry.message.retryLabel = '重试保存待发消息';
+              entry.message.retry = persist;
+            } finally {
+              queued.claimed = false;
+              publish();
+            }
+          };
+          await persist();
           publish();
         } else {
           void target.runtime.send(...args);
@@ -655,16 +724,14 @@ export function createSceneRuntime(state: ChatState, options: RuntimeOptions, cr
   runtime.stopCurrentTurn = async () => {
     const target = selected;
     if (target.local.stopping) return;
-    const pending = sendQueue.filter(next => next.session === target && next.saved.attachment && !['sending','failed'].includes(next.saved.phase));
-    if (!pending.length) {
+    const active = sendQueue.find(next => next.session === target && next.saved.phase === 'preparing' && !next.cancelled);
+    if (!active) {
       if (target.runtime.isSceneStreaming && !target.runtime.isSceneStreaming()) return;
       return target.runtime.stopCurrentTurn();
     }
     target.local.stopping = true; publish();
     try {
-      // Abort every selected-scene attachment synchronously before awaiting persistence.
-      await Promise.all(pending.map(next => next.entry.message.cancelQueued?.()));
-      await target.runtime.stopCurrentTurn();
+      await active.entry.message.cancelQueued?.();
     } finally { target.local.stopping = false; publish(); }
   };
   for (const method of ["handleFiles", "removePending"])

@@ -1,3 +1,4 @@
+import { SmallMenuDetails } from '../../shared/components/small-menu-details';
 import { catalogPage } from '../models/pagination';
 import { useEffect, useRef, useState } from "react";
 import type { SeedFilters, TownQuery } from "../../../shared/types";
@@ -37,7 +38,8 @@ export function SeedSearch({ town }: { town: TownModel }) {
     }}>
       <input type="search" aria-label="搜索种子" placeholder="搜索种子、领域或经验…" maxLength={300}
         value={filters.q} onChange={event => setFilters({ ...filters, q: event.target.value })} />
-      <details className="seed-filter-menu" ref={more} onKeyDown={event => {
+      <SmallMenuDetails className="seed-filter-menu" surfaceClassName="seed-filter-fields" ref={more}
+        summary={`筛选${Object.entries(town.seedFilters).some(([key, value]) => key !== "q" && value) ? " · 已设置" : ""}`} onKeyDown={event => {
         if (event.key !== "Escape") return;
         event.stopPropagation();
         if (event.target instanceof Element && event.target.closest("select:open")) return;
@@ -45,19 +47,16 @@ export function SeedSearch({ town }: { town: TownModel }) {
         event.currentTarget.open = false;
         event.currentTarget.querySelector("summary")?.focus();
       }}>
-        <summary>筛选{Object.entries(town.seedFilters).some(([key, value]) => key !== "q" && value) ? " · 已设置" : ""}</summary>
-        <div className="seed-filter-fields">
-          {([["domain", "领域"], ["tag", "标签"], ["kit", "Kit 经验墙"]] as [keyof SeedFilters, string][]).map(([key, label]) => (
-            <label key={key}>{label}<input aria-label={label} maxLength={300} value={filters[key]}
-              onChange={event => setFilters({ ...filters, [key]: event.target.value })} /></label>
-          ))}
-          <label>状态<select aria-label="种子状态" value={filters.lifecycle} onChange={event => setFilters({ ...filters, lifecycle: event.target.value })}>
-            <option value="">全部状态</option>
-            {Object.entries(states).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select></label>
-          <button className="secondary" type="submit">应用筛选</button>
-        </div>
-      </details>
+        {([["domain", "领域"], ["tag", "标签"], ["kit", "Kit 经验墙"]] as [keyof SeedFilters, string][]).map(([key, label]) => (
+          <label key={key}>{label}<input aria-label={label} maxLength={300} value={filters[key]}
+            onChange={event => setFilters({ ...filters, [key]: event.target.value })} /></label>
+        ))}
+        <label>状态<select aria-label="种子状态" value={filters.lifecycle} onChange={event => setFilters({ ...filters, lifecycle: event.target.value })}>
+          <option value="">全部状态</option>
+          {Object.entries(states).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </select></label>
+        <button className="secondary" type="submit">应用筛选</button>
+      </SmallMenuDetails>
       <button className="secondary" type="submit">搜索</button>
       {active && <button className="text-button" type="button" onClick={() => town.filterSeeds({ q: "", domain: "", tag: "", kit: "", lifecycle: "" })}>清除筛选</button>}
     </form>
@@ -77,10 +76,10 @@ export function SeedGarden({ town, data }: { town: TownModel; data: Data }) {
           {seeds.map(seed => <button key={str(seed.id)} className={`catalog-item${town.selectedId === seed.id ? " selected" : ""}`}
             aria-pressed={town.selectedId === seed.id} onClick={() => openSeed(town, str(seed.id))}>
             <span className="catalog-title">{str(seed.name, str(seed.domain, "经验种子"))}</span>
-            <span className="card-meta">{author(seed)} · {str(seed.domain)}</span>
+            <span className="card-meta">{[author(seed), str(seed.domain)].filter(Boolean).join(" · ")}</span>
             <p>{str(seed.brief_excerpt, str(seed.brief)).slice(0, 240)}</p>
             <span className="seed-tags">{strings(seed.tags).slice(0, 4).map(tag => <span className="mini-tag" key={tag}>{tag}</span>)}</span>
-            <span className="card-meta">{states[str(seed.lifecycle)] || "经验种子"} · {date(seed.updated_at || seed.created_at)}</span>
+            <span className="card-meta">{[states[str(seed.lifecycle)] || "经验种子", date(seed.updated_at || seed.created_at)].filter(Boolean).join(" · ")}</span>
           </button>)}
         </div>
         <SeedDetail town={town} />
@@ -99,9 +98,9 @@ export function SeedDetail({ town, direct = false }: { town: TownModel; direct?:
     {!seed && !town.detailLoading && !town.detailError && <div className="detail-placeholder">选一颗种子，看看它从哪里长出来。</div>}
     {seed && <>
       <h2 className="reading-title">{str(seed.name, str(seed.domain, "经验种子"))}</h2>
-      <p className="card-meta">{author(seed)} · {date(seed.updated_at || seed.created_at)}</p>
+      <p className="card-meta">{[author(seed), date(seed.updated_at || seed.created_at)].filter(Boolean).join(" · ")}</p>
       <ReadingActions town={town} route={`/seeds/${id}`} />
-      <p className="scroll-metadata">{str(seed.domain)} · {states[str(seed.lifecycle)] || "经验种子"} · {Number(seed.absorb_count || 0)} 次内化</p>
+      <p className="scroll-metadata">{[str(seed.domain), states[str(seed.lifecycle)] || "经验种子", `${Number(seed.absorb_count || 0)} 次内化`].filter(Boolean).join(" · ")}</p>
       <div className="seed-tags">
         {strings(seed.tags).map(tag => <button key={tag} className="mini-tag" onClick={() => town.filterSeeds({ q: "", domain: "", kit: "", lifecycle: "", tag })}>{tag}</button>)}
       </div>

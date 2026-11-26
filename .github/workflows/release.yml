@@ -73,25 +73,30 @@ jobs:
           fi
   build:
     needs: preflight
+    defaults:
+      run:
+        working-directory: client
     strategy:
       fail-fast: false
       matrix:
         os: [macos-14, macos-15-intel, windows-latest]
     # Keep the original job/artifact IDs used by staging and publication retries.
     runs-on: ${{ matrix.os == 'macos-14' && 'macos-15' || matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 120 || matrix.os == 'macos-15-intel' && 60 || 45 }}
     env:
       PORTAL_DESKTOP_UPDATE_REPOSITORY: ${{ vars.PORTAL_DESKTOP_UPDATE_REPOSITORY || github.repository }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.preflight.outputs.commit }}
+          path: client
           persist-credentials: false
           submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
+          cache-dependency-path: client/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
       - name: Import Apple Developer ID certificate (same secrets as Heart Portal)
         if: runner.os == 'macOS'
@@ -117,9 +122,32 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           echo "PORTAL_DESKTOP_MAC_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
       - run: npm ci
-      - uses: ./.github/actions/gateway-build-env
+      - uses: ./client/.github/actions/gateway-build-env
+      - name: Cache patched Windows Node build
+        id: task-node-cache
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            client/output/node-*/node.exe
+            client/output/node-*/node.sha256
+          key: windows-task-node-${{ hashFiles('client/scripts/portal-runtime/lock.json', 'client/scripts/portal-runtime/libuv-appcontainer.patch', 'client/scripts/portal-runtime/build-windows-node.mjs') }}
       - run: npm run typecheck
       - run: npm run build:portal
+      - name: Save completed Windows Node build
+        if: always() && runner.os == 'Windows' && steps.task-node-cache.outputs.cache-hit != 'true' && hashFiles('client/output/node-*/node.sha256') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            client/output/node-*/node.exe
+            client/output/node-*/node.sha256
+          key: ${{ steps.task-node-cache.outputs.cache-primary-key }}
+      - name: Verify isolated Windows Python and Node task workflows
+        if: runner.os == 'Windows'
+        run: |
+          node tests/windows-sandbox-cancellation-native.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:portal-permissions
       - run: npm test
       - name: Verify native Windows credential and task registration
         if: runner.os == 'Windows'
@@ -127,6 +155,8 @@ jobs:
           PORTAL_DESKTOP_NATIVE_UPGRADE_TESTS: '1'
         run: npx vitest run tests/background-native.test.ts
       - run: cargo test --manifest-path heart-portal/Cargo.toml --locked -- --test-threads=1
+        env:
+          HEART_PORTAL_RUNTIME_DIR: ${{ github.workspace }}/client/resources/portal-runtime
       - name: Verify native Windows service upgrade and rollback
         if: runner.os == 'Windows'
         env:
@@ -137,6 +167,9 @@ jobs:
         run: node tests/packaged-resources.mjs
       - name: Verify packaged Node runtime and plugin host without system Node
         run: npm run test:packaged-runtime
+      - name: Verify subagent with the bundled Portal runtime
+        if: runner.os == 'macOS'
+        run: npm run test:subagent-runtime
       - name: Verify cloud viewer resources inside ASAR
         if: runner.os == 'macOS'
         run: node tests/home-viewer-electron.mjs --packaged
@@ -170,15 +203,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer-diagnostics
-          path: test-results/windows-installer/
+          path: client/test-results/windows-installer/
           if-no-files-found: ignore
           retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: portal-desktop-${{ matrix.os }}
           path: |
-            out/make/
-            resources/runtime-bundle.json
+            client/out/make/
+            client/resources/runtime-bundle.json
           if-no-files-found: error
           retention-days: 30
   publish:

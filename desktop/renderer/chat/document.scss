@@ -7,3 +7,13 @@
 @use './styles/examples-layout';
 @use '../shared/styles/model-settings';
 @use '../shared/styles/settings-surface';
+@use './styles/design-tokens';
+@use './styles/desktop-palette';
+@use './styles/message-image-group';
+@use './styles/strict-fidelity';
+@use './styles/message-actions';
+@use './styles/attachment-menu';
+
+:root {
+  --chat-task-check: url('./assets/task-check.svg');
+}

@@ -48,3 +48,21 @@ it('rejects and cancels a chunked response exceeding 1 MiB by one byte', async (
     .rejects.toThrow('Being 状态响应过大（超过 1 MiB），Portal 未启动。');
   expect(cancel).toHaveBeenCalledOnce();
 });
+
+it('records the HTTP result and failing stage without URLs containing credentials or response bodies', async () => {
+  const diagnostic = vi.fn();
+  for (const [response, stage, status] of [
+    [new Response('private-token', { status: 403 }), 'http', 403],
+    [new Response('private-token'), 'response-body', 200],
+  ] as const) {
+    await expect(verifyBeingConnection(connection, async () => response, diagnostic)).rejects.toThrow();
+    expect(diagnostic).toHaveBeenLastCalledWith({ endpoint: connection.endpoint, route: '/api/status',
+      stage, status, ok: false, durationMs: expect.any(Number) });
+  }
+  await expect(verifyBeingConnection(connection, async () => { throw new Error(connection.link); }, diagnostic)).rejects.toThrow();
+  expect(diagnostic).toHaveBeenLastCalledWith(expect.objectContaining({ stage: 'request', status: undefined, ok: false }));
+  await verifyBeingConnection(connection, async () => Response.json({ name: 'Willow' }), diagnostic);
+  expect(diagnostic).toHaveBeenLastCalledWith(expect.objectContaining({ stage: 'validated', status: 200, ok: true }));
+  expect(diagnostic).toHaveBeenCalledTimes(4);
+  expect(JSON.stringify(diagnostic.mock.calls)).not.toMatch(/private-token|\?token/);
+});

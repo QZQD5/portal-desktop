@@ -214,8 +214,9 @@
   background: var(--bg);
 }
 
-.chat-session-search:focus-within {
-  border-color: var(--secondary);
+:root:not([data-pointer-focus]) .chat-session-search:has(> input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .chat-session-search svg {
@@ -238,6 +239,42 @@
 .chat-session-search input::placeholder {
   color: var(--secondary);
   opacity: 1;
+}
+
+.chat-session-panel[data-scene-sidebar] {
+  --scene-sidebar-text: light-dark(#2a2a2a, var(--neutral-text));
+  --scene-sidebar-icon: light-dark(#777, var(--neutral-secondary));
+  --scene-sidebar-meta: var(--neutral-tertiary);
+
+  color: var(--scene-sidebar-text);
+
+  :is(.chat-session-titlebar strong, .chat-session-search input, .chat-session-select) {
+    color: var(--scene-sidebar-text);
+  }
+
+  .chat-session-select[aria-current='true'] {
+    background: light-dark(var(--neutral-200), var(--selected));
+  }
+
+  :is(
+    .chat-session-collapse,
+    .chat-session-options summary,
+    .chat-session-search svg,
+    .chat-session-group button
+  ) {
+    color: var(--scene-sidebar-icon);
+  }
+
+  :is(.chat-session-group, .chat-session-caption, .chat-session-context-toggle),
+  .chat-session-search input::placeholder {
+    color: var(--scene-sidebar-meta);
+  }
+}
+
+html[data-local-sidebar]
+  .chat-session-panel[data-pinned='true'][data-scene-sidebar]
+  :is(.chat-session-caption, .chat-session-context-toggle) {
+  color: var(--scene-sidebar-meta);
 }
 
 .chat-session-options {
@@ -279,12 +316,21 @@
 
 .chat-session-options-popover {
   position: absolute;
+  transform-origin: top right;
   z-index: 2;
   inset: calc(100% + 8px) 0 auto;
   padding: 8px;
   border-radius: 18px;
   box-shadow: 0 12px 36px #00000026;
   background: var(--control);
+}
+
+.chat-session-options::details-content {
+  content-visibility: visible;
+}
+
+.chat-session-options:not([open]) .chat-session-options-popover {
+  pointer-events: none;
 }
 
 .chat-session-options-popover button {
@@ -370,7 +416,8 @@
   overscroll-behavior: contain;
 }
 
-.chat-session-list > button {
+.chat-session-list > button,
+.chat-session-select {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -388,7 +435,7 @@
   text-align: left;
 }
 
-.chat-session-list > button > span:first-of-type {
+:is(.chat-session-list > button, .chat-session-select) > span:first-of-type {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -396,22 +443,96 @@
   white-space: nowrap;
 }
 
-.chat-session-list > button[aria-current='true'] {
+:is(.chat-session-list > button, .chat-session-select)[aria-current='true'] {
   background: var(--selected);
-  color: var(--text);
+}
+
+.chat-session-list > button[aria-current='true'] {
   font-weight: 500;
 }
 
-.chat-session-current {
+.chat-session-item {
+  position: relative;
   flex-shrink: 0;
-  width: 6px;
-  height: 6px;
-  margin: 0 3px;
-  border-radius: 50%;
-  background: var(--green);
+  border-radius: 12px;
+}
+
+.chat-session-item:has(.chat-session-grip) > .chat-session-select {
+  padding-inline-start: 42px;
+}
+
+.chat-session-rename {
+  gap: 6px;
+  padding-block: 6px;
+  padding-inline-end: 8px;
+
+  input {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 6px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--workspace-panel);
+    color: var(--text);
+    font: inherit;
+
+    &:focus {
+      border-color: var(--accent);
+      outline: none;
+    }
+  }
+
+  button {
+    display: grid;
+    flex: 0 0 28px;
+    height: 28px;
+    place-items: center;
+    border-radius: 6px;
+    color: var(--secondary);
+  }
+}
+
+.chat-session-item[data-reordering] {
+  z-index: 1;
+  background: var(--selected);
+
+  > .chat-session-select {
+    pointer-events: none;
+  }
+}
+
+.chat-session-grip {
+  position: absolute;
+  inset-block-start: 8px;
+  inset-inline-start: 8px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--secondary);
+  cursor: grab;
+  touch-action: none;
+}
+
+.chat-session-item[data-reordering] > .chat-session-grip {
+  cursor: grabbing;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .chat-session-item:not(:hover, :focus-within, [data-reordering]) > .chat-session-grip {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-session-item {
+    transition: none !important;
+  }
 }
 
 .chat-session-activity {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -428,6 +549,30 @@
   width: 11px;
   height: 11px;
   flex-shrink: 0;
+}
+
+.chat-session-activity-icon[data-mark-playing] {
+  visibility: hidden;
+}
+
+.chat-session-status-mark {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+// Use the source size even when the scene button applies its default SVG size.
+/* stylelint-disable-next-line selector-class-pattern -- Shared global component selector. */
+.chat-session-activity .chat-session-status-mark .status-mark__glyph {
+  width: var(--sm-size);
+  height: var(--sm-size);
+}
+
+.chat-session-status-mark[data-playing] {
+  visibility: visible;
 }
 
 .chat-session-activity:is(
@@ -483,11 +628,20 @@
   content: '✓';
 }
 
-.chat-session-activity[data-status='error'] {
+.chat-session-activity:is(
+  [data-status='error'],
+  [data-status='send-failed'],
+  [data-status='task-failed']
+) {
   color: var(--danger, #b34b43);
 }
 
-.chat-session-activity[data-status='error'] .chat-session-activity-icon::after {
+.chat-session-activity:is(
+    [data-status='error'],
+    [data-status='send-failed'],
+    [data-status='task-failed']
+  )
+  .chat-session-activity-icon::after {
   content: '!';
   font-weight: 600;
 }
@@ -508,7 +662,8 @@
   }
 }
 
-.chat-session-panel button:hover:not(:disabled) {
+.chat-session-panel
+  button:hover:not(:disabled):where(:not(.chat-session-select[aria-current='true'])) {
   background: var(--hover);
 }
 
@@ -554,6 +709,7 @@
 }
 
 .chat-session-context-menu {
+  transform-origin: top left;
   position: fixed;
   z-index: 1000;
   width: 168px;

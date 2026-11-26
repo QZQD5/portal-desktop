@@ -66,7 +66,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.pa
             { town_id: 't_Bird', display_name: '山雀', display: '山雀 (t_Bird)', joined_at: '2026-09-03T12:00:00+08:00' },
           ]);
       if (url.pathname === '/api/fireside/hear') {
-        if (url.searchParams.get('fireside_id') === '11') await new Promise(resolve => setTimeout(resolve, 120));
+        if (url.searchParams.get('fireside_id') === '11') await globalThis.firesideResponse;
         const title = url.searchParams.get('fireside_id') === '11' ? '第二围炉消息' : '围炉消息';
         return json({ messages: Array.from({ length: 30 }, (_, index) => ({
           seq: index + 1,
@@ -126,7 +126,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.pa
   assert.equal(await page.getByRole('button', { name: '关于我', exact: true }).count(), 0);
   await page.getByRole('tab', { name: '已发送', exact: true }).click(); await page.getByText('已发送的测试信件').waitFor();
   await nav('bonfire'); await page.locator('#town-message-0 .social-body strong').getByText('篝火测试', { exact: true }).waitFor(); assert.equal(await page.evaluate(() => window.pwned), undefined);
-  await page.getByRole('button', { name: '展开对话', exact: true }).click();
+  await page.locator('#chat-view').waitFor({state:'visible'});
   await page.locator('#place-panel').waitFor();
   assert.equal(await page.locator('dialog#place-panel').count(), 0);
   await page.locator('.workspace-content').evaluate(async el => {
@@ -154,7 +154,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.pa
     return Math.abs(actual - (before + delta)) < 3;
   }, {before:chatWidth,delta});
   await page.getByRole('button', { name: '收起对话', exact: true }).click();
-  assert.equal(await page.locator('#chat-view').isVisible(), false);
+  await page.locator('#chat-view').waitFor({state:'hidden'});
   await page.locator('#place-panel').waitFor();
   const reply = page.locator('.feed-reply-preview');
   await reply.locator('summary').click();
@@ -194,9 +194,13 @@ readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.pa
   assert.equal(await page.locator('.fireside-thread-heading button').count(), 1);
   assert.equal(await page.locator('.fireside-thread-heading .fireside-members-trigger').count(), 1);
   const headingHeight = await page.locator('.fireside-thread-heading').evaluate(element => element.getBoundingClientRect().height);
+  await app.evaluate(() => {
+    globalThis.firesideResponse = new Promise(resolve => { globalThis.releaseFiresideResponse = resolve; });
+  });
   await page.locator('.fireside-room[data-id="11"]').click();
   await page.locator('.fireside-thread[aria-busy="true"] .fireside-loading-controls').waitFor();
   assert.equal(await page.locator('.fireside-thread-heading').evaluate(element => element.getBoundingClientRect().height), headingHeight);
+  await app.evaluate(() => globalThis.releaseFiresideResponse());
   await page.getByText('第二围炉消息', { exact: true }).waitFor();
   assert.equal(await page.locator('.fireside-thread-heading').evaluate(element => element.getBoundingClientRect().height), headingHeight);
   const roomGeometry = async () => page.locator('.fireside-room[data-id="10"]').evaluate(element => ({
@@ -247,11 +251,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.pa
     await nav('embers'); await page.locator('.catalog-item').first().waitFor();
   }
   await nav('kits'); await page.getByRole('checkbox', { name: '仅本机存在' }).uncheck();
-  await page.locator('.catalog-item').first().click(); await page.getByRole('button', { name: '安装到本机', exact: true }).click();
+  await page.locator('.catalog-item').first().click(); await page.getByRole('button', { name: '安装', exact: true }).click();
   await page.getByRole('heading', { name: '安装 downloaded-kit', exact: true }).waitFor();
   await page.locator('#kit-env-FIXTURE_API_KEY').fill('fixture-value');
   await mkdir('test-results', { recursive: true }); await page.screenshot({ path: 'test-results/kit-install.png' });
-  await page.locator('.kit-install-form').getByRole('button', { name: '安装到本机', exact: true }).click();
+  await page.locator('.kit-install-form').getByRole('button', { name: '安装', exact: true }).click();
   await page.getByRole('button', { name: '删除本机 Kit', exact: true }).waitFor({ timeout: 60000 });
   assert.equal(await page.getByRole('tab', { name: 'Kit', exact: true }).getAttribute('aria-selected'), 'true');
   assert.equal(await page.getByRole('checkbox', { name: '仅本机存在' }).isChecked(), false);
@@ -275,7 +279,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.pa
   assert(requests.filter(r => ['/api', '/api/grove', '/api/embers'].includes(r.path)).every(r => r.authorization === null));
   assert(requests.some(r => r.path === '/api/messages' && r.authorization === 'Bearer town-fixture-token'));
   const bodyBackground = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
-  assert.match(bodyBackground, /^rgb\(\d+, \d+, \d+\)$/, 'Renderer uses the configured opaque app background');
+  const nativeMaterial = process.platform === 'darwin' && await page.evaluate(() => matchMedia('(prefers-reduced-transparency: no-preference)').matches);
+  if (nativeMaterial) assert.equal(bodyBackground, 'rgba(0, 0, 0, 0)', 'macOS exposes the native window material');
+  else assert.match(bodyBackground, /^rgb\(\d+, \d+, \d+\)$/, 'Reduced transparency and other platforms use an opaque app background');
   assert.deepEqual(errors, []); console.log('Town UI passed: native material, real IPC, auth, mail folders, markdown, pagination, Kit import and tool schemas.');
 } catch (error) {
   await mkdir('test-results', { recursive: true });

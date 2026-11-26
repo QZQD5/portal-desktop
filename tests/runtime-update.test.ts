@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { BackgroundPortal, type Command } from '../desktop/main/portal/background';
@@ -36,13 +36,15 @@ async function fixture(platform: 'darwin' | 'win32' = 'darwin') {
     }
     return '';
   };
-  const settings: Settings = { endpoint: '', being: '', hasToken: true, portalName: 'test', portalBinary: process.execPath, workspace: root, autoStart: false, backgroundEnabled: true, allowExec: false, kitsEnabled: false };
+  // Commands are mocked; stage fixture bytes instead of copying the host's Node binary.
+  const oldBinary = path.join(root, 'old-engine');
+  await writeFile(oldBinary, 'old executable');
+  await chmod(oldBinary, 0o700);
+  const settings: Settings = { endpoint: '', being: '', hasToken: true, portalName: 'test', portalBinary: oldBinary, workspace: root, autoStart: false, backgroundEnabled: true, allowExec: false, kitsEnabled: false };
   const connection = parseConnection('https://example.org/test/?token=fixture-secret');
   const background = new BackgroundPortal(profile, run, platform, root);
   await background.enable(settings, connection);
   const previous = { ...background.installedService! };
-  // Commands are mocked; do not deep-compare the host's 100 MB Node executable.
-  await writeFile(path.join(previous.root, platform === 'win32' ? 'heart-portal.exe' : 'heart-portal'), 'old executable');
   const original = 'name = "test"\nworkspace = "unchanged"\n# custom tools and settings must survive\n';
   await writeFile(previous.configPath!, original);
   const binary = path.join(root, 'new-engine'); await writeFile(binary, 'new executable');
@@ -275,4 +277,19 @@ it('does not resurrect independent runtimes from an old interrupted migration jo
   expect(load).not.toHaveBeenCalled();
   expect(f.background.installedService).toBeNull();
   expect(await readFile(f.previous.configPath!, 'utf8')).toBe(f.original);
+});
+
+it.each(['darwin', 'win32'] as const)('stages the bundled Python/Node tree with the %s engine update', async platform => {
+  const f = await fixture(platform);
+  const runtime = path.join(path.dirname(f.binary), 'portal-runtime');
+  await mkdir(path.join(runtime, 'python'), { recursive: true });
+  await mkdir(path.join(runtime, 'node'), { recursive: true });
+  const id = 'c'.repeat(64);
+  await writeFile(path.join(runtime, 'runtime.json'), JSON.stringify({ schema: 1, id, python: { version: '3', path: 'python/interpreter' }, node: { version: '24', path: 'node/interpreter' } }));
+  await writeFile(path.join(runtime, 'python/interpreter'), 'bundled-interpreter');
+  await writeFile(path.join(runtime, 'node/interpreter'), 'bundled-node');
+  const result = await f.updater().sync(f.binary, { ...f.bundle, taskRuntimeId: id }, f.settings, f.connection);
+  expect(result.phase).toBe('updated');
+  expect(await readFile(path.join(f.profile, 'portal-runtimes', id, 'python/interpreter'), 'utf8')).toBe('bundled-interpreter');
+  expect(f.background.installedService!.environment?.HEART_PORTAL_RUNTIME_DIR).toBe(path.join(f.profile, 'portal-runtimes', id));
 });

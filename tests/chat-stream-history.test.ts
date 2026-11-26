@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sceneItems } from "../desktop/renderer/chat/models/scenes";
 import { replyBubbles } from "../desktop/renderer/chat/models/reply-bubbles";
 import { ChatState, type Message } from "../desktop/renderer/chat/models/chat";
 import { createChatRuntime } from "../desktop/renderer/chat/services/runtime";
@@ -19,11 +20,12 @@ describe("stream progress and persisted replies", () => {
 
   function fixture() {
     const history: any[] = [];
+    let active: any = null;
     let stream!: ReadableStreamDefaultController<Uint8Array>;
     vi.stubGlobal("fetch", vi.fn(async (input: string) => {
       const url = new URL(input);
       if (url.pathname === "/api/history") return Response.json({ messages: history.filter(m => m.seq > Number(url.searchParams.get("after") || 0)) });
-      if (url.pathname === "/api/stream/active") return new Response(null, { status: 204 });
+      if (url.pathname === "/api/stream/active") return active ? Response.json(active) : new Response(null, { status: 204 });
       if (url.pathname === "/health") return new Response("OK fixture");
       if (url.pathname === "/api/chat/stream" && stream) return Response.json({ queued: true }, { status: 202 });
       if (url.pathname === "/api/chat/stream") return new Response(new ReadableStream({ start(controller) { stream = controller; } }));
@@ -31,12 +33,169 @@ describe("stream progress and persisted replies", () => {
     }));
     const state = new ChatState(), runtime = createChatRuntime(state);
     return { state, runtime, history,
+      setActive: (value: any) => { active = value; },
       raw: (text: string) => stream.enqueue(new TextEncoder().encode(text)),
       event: (event: string, data: object) => stream.enqueue(new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify({ scene_id: "desktop-test", ...data })}\n\n`)),
       close: () => stream.close(),
       replies: () => state.items.filter((item): item is Message => item.kind === "message" && item.role === "being"),
     };
   }
+
+  it('keeps an empty history reply visible as an error and refetches its seq below the sync cursor', async () => {
+    const f = fixture();
+    f.history.push({ seq: 1, role: 'assistant', content: '', scene_id: 'desktop-test' });
+    try {
+      await f.runtime.start();
+      expect(f.replies()).toMatchObject([{ historySeq: 1, text: '', historyContentError: true }]);
+      f.history[0].content = 'recovered reply';
+      expect(await f.runtime.loadHistoryTarget(1, 'desktop-test', true)).toBe(true);
+      expect(f.replies()).toMatchObject([{ historySeq: 1, text: 'recovered reply', historyContentError: false }]);
+      expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/history?after=0&limit=1'))).toBe(true);
+      f.runtime.revealHistory([{ ...f.history[0], content: '' }]);
+      expect(f.replies()).toMatchObject([{ historySeq: 1, text: 'recovered reply', historyContentError: false }]);
+      f.history.push({ seq: 2, role: 'assistant', content: '  ', scene_id: 'desktop-test' });
+      await f.runtime.refreshHistory();
+      expect(f.replies()).toHaveLength(2);
+      expect(f.replies()[1]).toMatchObject({ historySeq: 2, text: '', historyContentError: true });
+    } finally { f.runtime.dispose(); }
+  });
+
+  it.each(['live', 'replay', 'routed'])('shows consecutive duplicate model errors once through %s', async transport => {
+    const f = fixture();
+    const error = {message:'LLM API error 429 Too Many Requests: Rate exceeded.'};
+    const errors = () => f.state.items.filter((item): item is Message => item.kind === 'message' && item.role === 'system');
+    try {
+      await f.runtime.start();
+      if (transport !== 'replay') {
+        await f.runtime.send('test rate limit');
+        await vi.advanceTimersByTimeAsync(0);
+        f.event('meta',{stream_id:'rate-limited'});
+        const scene = transport === 'routed' ? {scene_id:'other-scene'} : {};
+        f.event('error',{...error,...scene});f.event('error',{...error,...scene});
+        f.close();await vi.advanceTimersByTimeAsync(20);
+      } else {
+        f.setActive({stream_id:'rate-limited',scene_id:'desktop-test',finished:false,next_seq:3,
+          events:[{seq:1,event:'error',data:{scene_id:'desktop-test',...error}},{seq:2,event:'error',data:{scene_id:'desktop-test',...error}}]});
+        await vi.advanceTimersByTimeAsync(15000);
+      }
+      expect(errors()).toHaveLength(1);
+      expect(errors()[0]).toMatchObject({text:'⚠ '+error.message});
+      if (transport === 'routed') expect(errors()[0]).toMatchObject({sceneId:'other-scene'});
+    } finally {f.runtime.dispose();}
+  });
+
+  it('keeps distinct errors and the same error from a later stream', async () => {
+    const f=fixture();
+    const error={scene_id:'desktop-test',message:'rate limited'};
+    const errors=()=>f.state.items.filter((item): item is Message=>item.kind==='message'&&item.role==='system');
+    try {
+      await f.runtime.start();
+      f.setActive({stream_id:'first',scene_id:'desktop-test',finished:false,next_seq:4,events:[
+        {seq:1,event:'error',data:error},{seq:2,event:'error',data:{...error,message:'different failure'}},{seq:3,event:'error',data:{...error,message:'different failure'}}]});
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(errors().map(item=>item.text)).toEqual(['⚠ rate limited','⚠ different failure']);
+      const repeated={...error,message:'different failure'};
+      f.setActive({stream_id:'second',scene_id:'desktop-test',finished:false,next_seq:3,events:[
+        {seq:1,event:'error',data:repeated},{seq:2,event:'error',data:repeated}]});
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(errors().map(item=>item.text)).toEqual(['⚠ rate limited','⚠ different failure','⚠ different failure']);
+    } finally {f.runtime.dispose();}
+  });
+
+  it('preserves pasted stream JSON in its original user bubble when history catches up', async () => {
+    const f = fixture();
+    const text = '查看这个 JSON ' + JSON.stringify({
+      events: Array.from({ length: 100 }, (_, seq) => ({
+        seq, event: 'content_block_delta', data: { delta: { text: '｜DSML｜' } },
+      })),
+    });
+    const content = '【客户端场景与 Portal：测试场景；状态：已连接】\n\n' + text;
+    try {
+      await f.runtime.start();
+      await f.runtime.send(text);
+      await vi.advanceTimersByTimeAsync(0);
+      const user = f.state.items.find(item => item.kind === 'message' && item.role === 'user');
+      expect(user).toMatchObject({ text });
+      f.event('content_block_delta', { delta: { text: '收到' } });
+      f.event('message_stop', {});
+      f.close();
+      await vi.advanceTimersByTimeAsync(20);
+      f.history.push(
+        { seq: 1, role: 'user', content, scene_id: 'desktop-test' },
+        { seq: 2, role: 'assistant', content: '收到', scene_id: 'desktop-test' },
+      );
+      await f.runtime.refreshHistory();
+      expect(f.state.items.filter(item => item.kind === 'message')).toMatchObject([
+        { role: 'user', historySeq: 1, text }, { role: 'being', historySeq: 2, text: '收到' },
+      ]);
+      expect(f.state.items).toContain(user);
+    } finally { f.runtime.dispose(); }
+  });
+
+  it('does not bind JSON with different string whitespace to the local user bubble', async () => {
+    const f = fixture();
+    const text = '{"value":"a  b"}';
+    try {
+      await f.runtime.start();
+      await f.runtime.send(text);
+      await vi.advanceTimersByTimeAsync(0);
+      const user = f.state.items.find(item => item.kind === 'message' && item.role === 'user');
+      f.runtime.revealHistory([
+        { seq: 1, role: 'user', content: '{"value":"a b"}', scene_id: 'desktop-test' },
+        { seq: 2, role: 'user', content: text, scene_id: 'desktop-test' },
+      ]);
+      expect(user).toMatchObject({ historySeq: 2, text });
+      expect(f.state.items.filter(item => item.kind === 'message' && item.role === 'user')).toMatchObject([
+        { historySeq: 1, text: '{"value":"a b"}' }, { historySeq: 2, text },
+      ]);
+      f.close();
+    } finally { f.runtime.dispose(); }
+  });
+
+  it.each(['live', 'replay'])('does not render split tool markers or enter replying early through %s', async transport => {
+    const f = fixture();
+    const events: { event: string; data: object; seq: number }[] = [];
+    const push = async (event: string, data: object) => {
+      if (transport === 'live') {
+        f.event(event, data);
+        await vi.advanceTimersByTimeAsync(20);
+      } else {
+        events.push({ event, data: { scene_id: 'desktop-test', ...data }, seq: events.length + 1 });
+        f.setActive({ stream_id: 'split-marker', finished: false, events, next_seq: events.length + 1 });
+        await vi.advanceTimersByTimeAsync(events.length === 1 ? 10000 : 1000);
+      }
+    };
+    const delta = (text: string) => push('content_block_delta', { delta: { text } });
+    const activity = () => f.state.items.filter(item => item.kind === 'run').at(-1)?.status;
+    try {
+      await f.runtime.start();
+      if (transport === 'live') {
+        await f.runtime.send('check');
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      await delta('<');
+      expect(f.replies()).toHaveLength(0);
+      expect(activity()).not.toBe('replying');
+      expect(f.state.thinking).toBe(true);
+      await delta('｜DSML｜');
+      await delta(' calls');
+      expect(f.replies()).toHaveLength(0);
+      await push('tool_use', { name: 'read_file' });
+      expect(activity()).toBe('working');
+      await push('tool_result', { name: 'read_file', summary: 'ok' });
+      await delta('结果：1 <');
+      expect(f.replies()).toMatchObject([{ text: '结果：1' }]);
+      await delta(' 2');
+      expect(f.replies()).toMatchObject([{ text: '结果：1 < 2' }]);
+      expect(activity()).toBe('replying');
+      await delta('<');
+      await delta('｜DSML｜ calls');
+      expect(f.replies()).toMatchObject([{ text: '结果：1 < 2' }]);
+      await push('message_stop', {});
+      expect(f.replies()).toMatchObject([{ text: '结果：1 < 2', streaming: false }]);
+      if (transport === 'live') f.close();
+    } finally { f.runtime.dispose(); }
+  });
 
   it('renders framed multiline SSE, ignores untyped data and discards incomplete acknowledgements', async () => {
     const f = fixture();
@@ -206,6 +365,41 @@ describe("stream progress and persisted replies", () => {
     } finally { f.runtime.dispose(); }
   });
 
+  it.each(['before-meta', 'after-meta', 'after-final'])('reconciles combined act_talk history arriving %s', async order => {
+    const f = fixture();
+    const parts = ['两件事分开答：第一条已经记录。', '第二条也已记录，现在继续检查。'];
+    const row = {seq:10, role:'assistant', scene_id:'desktop-test', content:parts.join('\n\n')};
+    try {
+      await f.runtime.start();
+      await f.runtime.send('检查记录');
+      await vi.advanceTimersByTimeAsync(0);
+      for (const text of parts) {
+        f.event('content_block_delta', {delta:{text}});
+        f.event('tool_use', {name:'read', input:{}});
+      }
+      await vi.advanceTimersByTimeAsync(20);
+      const first = f.replies()[0];
+      if (order === 'before-meta') { f.history.push(row); await f.runtime.refreshHistory(); }
+      f.event('meta', {persisted:{from:'act_talk', kind:'self', seq:10, stream_id:'talk-stream'}});
+      await vi.advanceTimersByTimeAsync(20);
+      if (order === 'after-meta') { f.history.push(row); await f.runtime.refreshHistory(); }
+      f.event('content_block_delta', {delta:{text:'检查完成。'}});
+      f.event('meta', {persisted:{from:'final', kind:'self', seq:11, stream_id:'talk-stream'}});
+      f.event('message_stop', {});
+      f.close();
+      await vi.advanceTimersByTimeAsync(20);
+      if (order === 'after-final') f.history.push(row);
+      f.history.push({seq:11, role:'assistant', scene_id:'desktop-test', content:'检查完成。'});
+      await f.runtime.refreshHistory();
+      await f.runtime.refreshHistory();
+      expect(f.replies().map(message => message.text)).toEqual([row.content, '检查完成。']);
+      expect(f.replies()[0]).toBe(first);
+      expect(first).toMatchObject({historySeq:10, persistedFrom:'act_talk', streaming:false});
+      const bubbles = replyBubbles(f.state.items).filter((item): item is Message => item.kind === 'message' && item.role === 'being');
+      expect(bubbles.map(message => message.text).join('\n\n')).toBe(row.content + '\n\n检查完成。');
+    } finally { f.runtime.dispose(); }
+  });
+
   it.each(["act_talk", "partial"])("binds %s and final independently in one stream", async from => {
     const f = fixture();
     try {
@@ -227,6 +421,22 @@ describe("stream progress and persisted replies", () => {
         { historySeq: 10, text: "过程落库", persistedFrom: from, interim: true },
         { historySeq: 11, text: "终稿落库", persistedFrom: "final" },
       ]);
+    } finally { f.runtime.dispose(); }
+  });
+
+  it.each(['initial', 'refresh'])('keeps superseded markers out of the transcript after %s history', async phase => {
+    const f = fixture();
+    const marker = {seq:1, from:'system', type:'marker', content:'[breath superseded]', scene_id:'desktop-test'};
+    try {
+      if (phase === 'initial') f.history.push(marker);
+      await f.runtime.start();
+      if (phase === 'refresh') {
+        f.history.push(marker);
+        await f.runtime.refreshHistory();
+      }
+      const stored = f.state.items.find(item => item.kind === 'separator' && item.handoffMarker);
+      expect(stored).toBeDefined();
+      expect(sceneItems(f.state.items, 'all', f.state.currentScene)).not.toContain(stored);
     } finally { f.runtime.dispose(); }
   });
 

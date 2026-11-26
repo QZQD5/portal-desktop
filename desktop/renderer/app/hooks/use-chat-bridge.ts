@@ -5,6 +5,7 @@ import type { AppModel } from "../models/app";
 import { validPlaceTarget } from "../../shared/lib/navigation";
 import { CHAT_SCENE_ACTIVITY_LABELS, type ChatSceneActivity } from "../../../shared/types";
 import { dshRuntime } from '../../plugins/dsh/runtime';
+import { CLIPBOARD_TEXT_MAX_LENGTH } from '../../../shared/clipboard';
 
 /** This is the only shell bridge into the separate, sandboxed Loom document. */
 export function useChatBridge(
@@ -67,7 +68,7 @@ export function useChatBridge(
     };
   }, [app, frame, app.startup, app.view, app.chatSource]);
   useEffect(() => {
-    app.post({ type: 'beings:permission-state', mode: app.snapshot?.settings.permissionMode ?? 'auto-review', open: app.permissionSettingsOpen,
+    app.post({ type: 'beings:permission-state', mode: app.snapshot?.settings.permissionMode ?? 'supervised', open: app.permissionSettingsOpen,
       revision: new URL(frame.current?.src || 'https://invalid').searchParams.get('revision') });
   }, [app, frame, app.snapshot?.settings.permissionMode, app.permissionSettingsOpen, app.chatSource]);
   useEffect(() => {
@@ -85,6 +86,7 @@ export function useChatBridge(
   }, [app, frame, app.snapshot?.settings.endpoint, app.snapshot?.settings.portalConfigPath, app.snapshot?.portal.phase, app.snapshot?.portal.pid, app.chatSource, app.snapshot?.chatSessions?.map(scene => scene.scene_id).join('|')]);
   useEffect(() => {
     let enablingSubagent = false;
+    let connectionNotice = '';
     const receive = (event: MessageEvent) => {
       const target = frame.current;
       if (
@@ -95,6 +97,8 @@ export function useChatBridge(
         return;
       const message = event.data;
       if (!message || typeof message !== "object") return;
+      if (message.revision !== new URL(target.src).searchParams.get("revision"))
+        return;
       if (
         message.type === "beings:connection" &&
         [
@@ -107,11 +111,16 @@ export function useChatBridge(
       ) {
         app.connection = message.state;
         app.workspace.connection(message.state === "online");
+        if (typeof message.notice === 'string' && message.notice.length <= 2000) {
+          if (message.notice) {
+            if (!connectionNotice || !app.toastMessage || app.toastMessage === connectionNotice) app.toast(message.notice);
+          }
+          else if (connectionNotice && app.toastMessage === connectionNotice) app.toast('');
+          connectionNotice = message.notice;
+        }
         app.changed();
         return;
       }
-      if (message.revision !== new URL(target.src).searchParams.get("revision"))
-        return;
       if (message.type === 'beings:voice-state-request') {
         app.post({ type: 'beings:voice-state', state: voiceState.current, revision: message.revision });
         return;
@@ -140,6 +149,11 @@ export function useChatBridge(
           if (snapshot.endpoint === app.snapshot?.settings.endpoint && frame.current === target && new URL(target.src).searchParams.get('revision') === message.revision)
             app.post({ type: 'beings:scene-tasks', ...snapshot, revision: message.revision });
         }).catch(() => {});
+        return;
+      }
+      if (message.type === 'beings:subagent-tasks-open') {
+        if (Array.isArray(message.taskIds) && message.taskIds.length > 0 && message.taskIds.length <= 200 &&
+          message.taskIds.every((id: unknown) => typeof id === 'string' && id.length <= 256)) app.openSubagentTasks(message.taskIds, typeof message.selectedId === 'string' && message.taskIds.includes(message.selectedId) ? message.selectedId : undefined);
         return;
       }
       if (message.type === 'beings:subagent-enable' && typeof message.id === 'string' && message.id.length <= 64) {
@@ -172,12 +186,21 @@ export function useChatBridge(
         return;
       }
       if (message.type === 'beings:chat-copy' && typeof message.id === 'string' && message.id.length <= 64 &&
-          typeof message.text === 'string' && message.text.length <= 200000) {
+          typeof message.text === 'string' && message.text.length <= CLIPBOARD_TEXT_MAX_LENGTH) {
         const reply = (ok: boolean) => {
           if (frame.current === target && new URL(target.src).searchParams.get('revision') === message.revision)
             app.post({ type: 'beings:chat-edit-result', id: message.id, revision: message.revision, ok });
         };
         void app.api.copyText(message.text).then(() => reply(true), () => reply(false));
+        return;
+      }
+      if (message.type === 'beings:image-copy' && typeof message.id === 'string' && message.id.length <= 64 &&
+          typeof message.revision === 'string' && message.revision.length <= 128 &&
+          (message.data instanceof ArrayBuffer || ArrayBuffer.isView(message.data)) && message.data.byteLength > 0 && message.data.byteLength <= 128 * 1024 * 1024 &&
+          typeof message.mime === 'string' && /^image\/(png|jpeg|gif|webp)$/.test(message.mime)) {
+        const raw = message.data instanceof ArrayBuffer ? message.data : message.data.buffer.slice(message.data.byteOffset, message.data.byteOffset + message.data.byteLength);
+        const reply = (ok: boolean, error?: string) => event.source?.postMessage({ type: 'beings:image-copy-result', id: message.id, revision: message.revision, ok, ...(error ? { error } : {}) }, { targetOrigin: event.origin });
+        void app.api.copyImage(raw, message.mime).then(() => reply(true), error => reply(false, error instanceof Error ? error.message : '复制图片失败'));
         return;
       }
       if (message.type === "beings:chat-edit" && typeof message.id === "string" && message.id.length <= 64 &&
@@ -233,7 +256,7 @@ export function useChatBridge(
         return;
       }
       if (message.type === 'beings:permission-state-request') {
-        app.post({ type: 'beings:permission-state', mode: app.snapshot?.settings.permissionMode ?? 'auto-review', open: app.permissionSettingsOpen, revision: message.revision });
+        app.post({ type: 'beings:permission-state', mode: app.snapshot?.settings.permissionMode ?? 'supervised', open: app.permissionSettingsOpen, revision: message.revision });
         return;
       }
       if (message.type === 'beings:permission-dismiss') { app.closePermissionSettings(); return; }
